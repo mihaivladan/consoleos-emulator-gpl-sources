@@ -24,7 +24,7 @@ exports() {
 }
 
 options() {
-  strings "$1" | grep '^swanstation_' | LC_ALL=C sort -u
+  aarch64-linux-gnu-strings "$1" | grep '^swanstation_' | LC_ALL=C sort -u
 }
 
 needed "$stock" > "$report_dir/STOCK-NEEDED.txt"
