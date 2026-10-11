@@ -33,10 +33,10 @@ allowed='libc.so.6 libm.so.6 libstdc++.so.6 libgcc_s.so.1'
 while IFS= read -r soname; do
   case " $allowed " in
     *" $soname "*) ;;
-    *) echo "unexpected NEEDED soname: $soname" >&2; exit 1 ;;
+    *) echo "::error title=SwanStation ABI::unexpected NEEDED soname: $soname"; exit 1 ;;
   esac
   find "$target_root" \( -type f -o -type l \) -name "$soname" -print -quit | grep -q . || {
-    echo "target runtime lacks $soname" >&2
+    echo "::error title=SwanStation ABI::target runtime lacks $soname"
     exit 1
   }
 done < "$report_dir/CANDIDATE-NEEDED.txt"
@@ -53,18 +53,31 @@ find "$target_root/usr/lib" \( -type f -o -type l \) \
   grep -E '^(GLIBC|GLIBCXX|GCC)_[0-9]' | LC_ALL=C sort -u > "$report_dir/ROCKNIX-SYMBOL-VERSIONS.txt"
 comm -23 "$report_dir/CANDIDATE-SYMBOL-VERSIONS.txt" \
   "$report_dir/ROCKNIX-SYMBOL-VERSIONS.txt" > "$report_dir/MISSING-SYMBOL-VERSIONS.txt"
-test ! -s "$report_dir/MISSING-SYMBOL-VERSIONS.txt"
+if [ -s "$report_dir/MISSING-SYMBOL-VERSIONS.txt" ]; then
+  missing_versions=$(tr '\n' ' ' < "$report_dir/MISSING-SYMBOL-VERSIONS.txt")
+  echo "::error title=SwanStation ABI::target runtime lacks symbol versions: $missing_versions"
+  exit 1
+fi
 
 exports "$stock" > "$report_dir/STOCK-EXPORTS.txt"
 exports "$candidate" > "$report_dir/CANDIDATE-EXPORTS.txt"
-diff -u "$report_dir/STOCK-EXPORTS.txt" "$report_dir/CANDIDATE-EXPORTS.txt" \
-  > "$report_dir/EXPORT-DIFF.txt"
+if ! diff -u "$report_dir/STOCK-EXPORTS.txt" "$report_dir/CANDIDATE-EXPORTS.txt" \
+    > "$report_dir/EXPORT-DIFF.txt"; then
+  export_delta=$(tr '\n' ' ' < "$report_dir/EXPORT-DIFF.txt" | cut -c1-500)
+  echo "::error title=SwanStation ABI::export mismatch: $export_delta"
+  exit 1
+fi
 
 options "$stock" > "$report_dir/STOCK-CORE-OPTIONS.txt"
 options "$candidate" > "$report_dir/CANDIDATE-CORE-OPTIONS.txt"
 comm -13 "$report_dir/STOCK-CORE-OPTIONS.txt" "$report_dir/CANDIDATE-CORE-OPTIONS.txt" \
   > "$report_dir/ADDED-CORE-OPTIONS.txt"
-printf '%s\n' swanstation_BIOS_FastForwardBoot | diff -u - "$report_dir/ADDED-CORE-OPTIONS.txt"
+if ! printf '%s\n' swanstation_BIOS_FastForwardBoot | \
+    diff -u - "$report_dir/ADDED-CORE-OPTIONS.txt" > "$report_dir/CORE-OPTION-DIFF.txt"; then
+  option_delta=$(tr '\n' ' ' < "$report_dir/CORE-OPTION-DIFF.txt" | cut -c1-500)
+  echo "::error title=SwanStation core options::unexpected option delta: $option_delta"
+  exit 1
+fi
 
 grep -Fxq swanstation_BIOS_PatchFastBoot "$report_dir/CANDIDATE-CORE-OPTIONS.txt"
 grep -Fxq swanstation_BIOS_FastForwardBoot "$report_dir/CANDIDATE-CORE-OPTIONS.txt"
