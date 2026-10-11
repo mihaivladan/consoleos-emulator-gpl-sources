@@ -49,7 +49,11 @@ if ! comm -23 "$report_dir/CANDIDATE-SYMBOL-VERSIONS.txt" \
     > "$report_dir/MISSING-SYMBOL-VERSIONS.txt"; then
   exit 1
 fi
-test ! -s "$report_dir/MISSING-SYMBOL-VERSIONS.txt"
+if [ -s "$report_dir/MISSING-SYMBOL-VERSIONS.txt" ]; then
+  echo 'symbol versions missing from the ROCKNIX runtime:' >&2
+  cat "$report_dir/MISSING-SYMBOL-VERSIONS.txt" >&2
+  exit 1
+fi
 
 stock_interpreter=$(aarch64-linux-gnu-readelf -l "$stock" | \
   sed -n 's/.*Requesting program interpreter: \(.*\)]/\1/p')
