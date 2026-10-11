@@ -110,6 +110,10 @@ jobs:
             bash rocknix/retroarch/build-in-container.sh \
               /work/retroarch /work/$ARTIFACT_DIR /work/$TARGET_ROOT \
             2>&1 | tee retroarch-build.log
+          docker run --rm \
+            -v "$PWD:/work" \
+            "$BUILD_CONTAINER" \
+            chown -R "$(id -u):$(id -g)" "/work/$ARTIFACT_DIR"
 
       - name: Complete artifact provenance
         if: steps.artifact-cache.outputs.cache-hit != 'true'
