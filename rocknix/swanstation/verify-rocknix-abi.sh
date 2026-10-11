@@ -29,10 +29,21 @@ options() {
 
 needed "$stock" > "$report_dir/STOCK-NEEDED.txt"
 needed "$candidate" > "$report_dir/CANDIDATE-NEEDED.txt"
+if ! diff -u "$report_dir/STOCK-NEEDED.txt" "$report_dir/CANDIDATE-NEEDED.txt" \
+    > "$report_dir/NEEDED-DIFF.txt"; then
+  needed_delta=$(tr '\n' ' ' < "$report_dir/NEEDED-DIFF.txt" | cut -c1-500)
+  echo "::error title=SwanStation ABI::NEEDED mismatch from unpatched control: $needed_delta"
+  exit 1
+fi
+
 allowed='libc.so.6 libm.so.6 libstdc++.so.6 libgcc_s.so.1'
 while IFS= read -r soname; do
   case " $allowed " in
     *" $soname "*) ;;
+    # GCC's AArch64 shared-object link adds the ELF interpreter to DT_NEEDED.
+    # Treat it as the target loader, not as an application-library dependency,
+    # and permit it only because the unpatched control has the identical entry.
+    *" ld-linux-aarch64.so.1 "*) ;;
     *) echo "::error title=SwanStation ABI::unexpected NEEDED soname: $soname"; exit 1 ;;
   esac
   find "$target_root" \( -type f -o -type l \) -name "$soname" -print -quit | grep -q . || {
@@ -84,7 +95,8 @@ grep -Fxq swanstation_BIOS_FastForwardBoot "$report_dir/CANDIDATE-CORE-OPTIONS.t
 
 {
   printf 'abi_gate=pass\n'
-  printf 'needed_sonames=allowlisted-and-present\n'
+  printf 'needed_sonames=match-unpatched-control-and-present\n'
+  printf 'elf_loader=ld-linux-aarch64.so.1-present-in-control-candidate-and-target\n'
   printf 'symbol_versions=all-provided-by-rocknix-runtime\n'
   printf 'exports=match-unpatched-control\n'
   printf 'core_options=unpatched-plus-fast-forward-boot\n'
