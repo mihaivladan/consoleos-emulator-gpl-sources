@@ -85,7 +85,6 @@ jobs:
           key: ${{ steps.inputs.outputs.cache_key }}
 
       - name: Restore pinned ROCKNIX runtime root
-        if: steps.artifact-cache.outputs.cache-hit != 'true'
         id: runtime-cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
@@ -93,12 +92,19 @@ jobs:
           key: rocknix-sm8250-runtime-${{ env.ROCKNIX_COMMIT }}-${{ env.ROCKNIX_RELEASE_SHA256 }}
 
       - name: Extract checksum-verified ROCKNIX runtime root
-        if: steps.artifact-cache.outputs.cache-hit != 'true' && steps.runtime-cache.outputs.cache-hit != 'true'
+        if: steps.runtime-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euo pipefail
           rocknix/retroarch/extract-rocknix-runtime.sh \
             "$ROCKNIX_RELEASE_URL" "$ROCKNIX_RELEASE_SHA256" "$TARGET_ROOT"
+
+      - name: Save pinned ROCKNIX runtime root before verification
+        if: steps.runtime-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: rocknix-target-root
+          key: rocknix-sm8250-runtime-${{ env.ROCKNIX_COMMIT }}-${{ env.ROCKNIX_RELEASE_SHA256 }}
 
       - name: Build unpatched control
         if: steps.artifact-cache.outputs.cache-hit != 'true'
