@@ -145,8 +145,8 @@ jobs:
           rocknix/swanstation/verify-rocknix-abi.sh \
             "$TARGET_ROOT" "$ARTIFACT_DIR/swanstation_libretro-control.so" \
             "$ARTIFACT_DIR/swanstation_libretro.so" "$ARTIFACT_DIR"
-          aarch64-linux-gnu-strings "$ARTIFACT_DIR/swanstation_libretro-low-bound.so" | \
-            grep -Fxq swanstation_BIOS_FastForwardBoot
+          grep -aFq swanstation_BIOS_FastForwardBoot \
+            "$ARTIFACT_DIR/swanstation_libretro-low-bound.so"
 
       - name: Complete artifact provenance
         shell: bash
