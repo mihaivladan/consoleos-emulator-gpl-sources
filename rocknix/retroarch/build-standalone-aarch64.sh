@@ -90,6 +90,7 @@ configure_flags=(
   --disable-opengles3_2
   --enable-vulkan
   --enable-vulkan_display
+  --enable-v4l2
 )
 
 make_flags=(
