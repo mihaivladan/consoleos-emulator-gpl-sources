@@ -51,17 +51,20 @@ interpreter=$($READELF -l "$target_root/usr/bin/retroarch" | \
 test -n "$interpreter"
 target_loader=$target_root$interpreter
 target_mvec=$target_link/libmvec.so.1
+toolchain_nonshared=$($CC -print-file-name=libc_nonshared.a)
 test -f "$target_loader"
 test -f "$target_mvec"
+test -f "$toolchain_nonshared"
 test "$($READELF -d "$target_mvec" | \
   sed -n 's/.*(SONAME).*\[\(.*\)\].*/\1/p' | head -1)" = libmvec.so.1
 rpath_link=$(find "$target_lib" -type f -name '*.so*' -exec dirname {} \; | \
   LC_ALL=C sort -u | paste -sd: -)
 test -n "$rpath_link"
-# Keep the exact target loader and libmvec DSO on the final link line. glibc's
-# vector entry points are referenced directly by the sinc resampler, so GNU ld
-# will not accept libmvec merely as a transitive dependency of libm/libc.
-export LDFLAGS="-L$target_link -Wl,-rpath-link,$rpath_link -Wl,--dynamic-linker=$interpreter -Wl,--no-as-needed $target_loader $target_mvec -Wl,--as-needed"
+# Keep glibc's link-only support archive plus the exact target loader and
+# libmvec DSO on the final link line. The stripped runtime image does not carry
+# libc_nonshared.a (which supplies atexit), while the sinc resampler references
+# libmvec vector entry points directly rather than through libm/libc.
+export LDFLAGS="-L$target_link -Wl,-rpath-link,$rpath_link -Wl,--dynamic-linker=$interpreter $toolchain_nonshared -Wl,--no-as-needed $target_loader $target_mvec -Wl,--as-needed"
 
 configure_flags=(
   --host=aarch64-linux-gnu
@@ -116,6 +119,9 @@ printf '%s\n' "${make_flags[@]}" > "$artifact_dir/MAKE-FLAGS.txt"
 {
   "$CC" --version | head -1
   "$LD" --version | head -1
+  printf 'libc_nonshared=%s\n' "$toolchain_nonshared"
+  sha256sum "$toolchain_nonshared"
+  dpkg-query -S "$(readlink -f "$toolchain_nonshared")"
   dpkg-query -W -f='${Package}=${Version}\n' \
     gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu
 } > "$artifact_dir/TOOLCHAIN.txt"

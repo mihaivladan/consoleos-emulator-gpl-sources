@@ -24,12 +24,14 @@ The configure options are the exact options selected by the pinned ROCKNIX
 recipe for `ROCKNIX`, `SM8250`, `aarch64`: Wayland, full OpenGL (SM8250 has
 `PREFER_GLES=no`), Vulkan and Vulkan display. The corresponding make-time
 feature switches are preserved too. `build-standalone-aarch64.sh` is the
-reproducible GPL build script. Ubuntu 25.04 supplies the compiler, headers and
-pkg-config metadata, but the final link resolves shared libraries from the
-checksum-verified ROCKNIX 20260901 runtime image. The link explicitly retains
-that runtime's loader and `libmvec.so.1`; the latter supplies the vector math
-entry points referenced directly by RetroArch's sinc resampler and may not be
-satisfied through an Ubuntu library or an implicit transitive dependency.
+reproducible GPL build script. Ubuntu 25.04 supplies the compiler, headers,
+pkg-config metadata and glibc 2.41's link-only `libc_nonshared.a`; the archive
+is statically embedded because a stripped runtime image does not ship it. All
+dynamic libraries resolve from the checksum-verified ROCKNIX 20260901 runtime
+image. The link explicitly retains that runtime's loader and `libmvec.so.1`;
+the latter supplies the vector math entry points referenced directly by
+RetroArch's sinc resampler and may not be satisfied through an Ubuntu library
+or an implicit transitive dependency.
 Every artifact contains the
 resolved build command, configure flags, make flags, toolchain versions,
 config log, hashes and provenance.
