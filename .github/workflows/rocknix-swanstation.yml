@@ -172,8 +172,9 @@ jobs:
             printf 'artifact_cache_key=%s\n' '${{ steps.inputs.outputs.cache_key }}'
             printf 'device_smoke_required=true\n'
           } > "$ARTIFACT_DIR/PROVENANCE"
-          find "$ARTIFACT_DIR" -maxdepth 1 -type f ! -name SHA256SUMS -print0 | \
-            LC_ALL=C sort -z | xargs -0 sha256sum > "$ARTIFACT_DIR/SHA256SUMS"
+          (cd "$ARTIFACT_DIR" && \
+            find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 | \
+            LC_ALL=C sort -z | xargs -0 sha256sum > SHA256SUMS)
 
       - name: Verify cached or newly built artifacts
         shell: bash
