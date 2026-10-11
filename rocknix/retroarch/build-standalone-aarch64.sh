@@ -49,10 +49,19 @@ done < <(find "$target_lib" -type f -name '*.so*' | LC_ALL=C sort)
 interpreter=$($READELF -l "$target_root/usr/bin/retroarch" | \
   sed -n 's/.*Requesting program interpreter: \(.*\)]/\1/p')
 test -n "$interpreter"
+target_loader=$target_root$interpreter
+target_mvec=$target_link/libmvec.so.1
+test -f "$target_loader"
+test -f "$target_mvec"
+test "$($READELF -d "$target_mvec" | \
+  sed -n 's/.*(SONAME).*\[\(.*\)\].*/\1/p' | head -1)" = libmvec.so.1
 rpath_link=$(find "$target_lib" -type f -name '*.so*' -exec dirname {} \; | \
   LC_ALL=C sort -u | paste -sd: -)
 test -n "$rpath_link"
-export LDFLAGS="-L$target_link -Wl,-rpath-link,$rpath_link -Wl,--dynamic-linker=$interpreter -Wl,--no-as-needed $target_root$interpreter -Wl,--as-needed"
+# Keep the exact target loader and libmvec DSO on the final link line. glibc's
+# vector entry points are referenced directly by the sinc resampler, so GNU ld
+# will not accept libmvec merely as a transitive dependency of libm/libc.
+export LDFLAGS="-L$target_link -Wl,-rpath-link,$rpath_link -Wl,--dynamic-linker=$interpreter -Wl,--no-as-needed $target_loader $target_mvec -Wl,--as-needed"
 
 configure_flags=(
   --host=aarch64-linux-gnu
