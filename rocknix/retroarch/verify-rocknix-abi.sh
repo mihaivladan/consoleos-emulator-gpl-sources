@@ -41,7 +41,7 @@ required_versions "$candidate" > "$report_dir/CANDIDATE-SYMBOL-VERSIONS.txt"
 {
   find "$target_root/usr/lib" \( -type f -o -type l \) \
     \( -name 'libc.so.6' -o -name 'libstdc++.so.6*' -o -name 'libgcc_s.so.1' \) \
-    -exec strings {} +
+    -exec aarch64-linux-gnu-strings {} +
 } | grep -E '^(GLIBC|GLIBCXX|GCC)_[0-9]' | LC_ALL=C sort -u \
   > "$report_dir/ROCKNIX-SYMBOL-VERSIONS.txt"
 if ! comm -23 "$report_dir/CANDIDATE-SYMBOL-VERSIONS.txt" \
