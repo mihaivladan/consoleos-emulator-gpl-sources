@@ -1,0 +1,298 @@
+From 9c2faddbf7dff3f14c663af8c67cb86da64a6309 Mon Sep 17 00:00:00 2001
+From: mihaivladan <mihai.vladan@gmail.com>
+Date: Mon, 12 Oct 2026 00:17:30 +0300
+Subject: [PATCH] Add bounded clean-room fast-forward boot
+
+---
+ src/core/gpu.cpp                         |  1 +
+ src/core/host_interface.cpp              |  1 +
+ src/core/settings.cpp                    |  1 +
+ src/core/settings.h                      |  1 +
+ src/core/system.cpp                      | 42 ++++++++++++++++++++-
+ src/core/system.h                        |  9 +++++
+ src/libretro/libretro_core_options.h     | 12 ++++++
+ src/libretro/libretro_host_interface.cpp | 48 +++++++++++++++++++++++-
+ src/libretro/libretro_host_interface.h   |  2 +
+ 9 files changed, 114 insertions(+), 3 deletions(-)
+
+diff --git a/src/core/gpu.cpp b/src/core/gpu.cpp
+index 6868ad5d..c2ba2a9e 100644
+--- a/src/core/gpu.cpp
++++ b/src/core/gpu.cpp
+@@ -1064,6 +1064,7 @@ void GPU::WriteGP1(u32 value)
+ 
+     case 0x05: // Set display start address
+     {
++      System::NotifyDisplayStartWrite();
+       const u32 new_value = param & CRTCState::Regs::DISPLAY_ADDRESS_START_MASK;
+ 
+       if (m_crtc_state.regs.display_address_start != new_value)
+diff --git a/src/core/host_interface.cpp b/src/core/host_interface.cpp
+index 0a1cfe7b..2046ad1a 100644
+--- a/src/core/host_interface.cpp
++++ b/src/core/host_interface.cpp
+@@ -272,6 +272,7 @@ void HostInterface::FixIncompatibleSettings(bool display_osd_messages)
+     g_settings.cdrom_mute_cd_audio = false;
+     g_settings.texture_replacements.enable_vram_write_replacements = false;
+     g_settings.bios_patch_fast_boot = false;
++    g_settings.bios_fast_forward_boot = false;
+     g_settings.bios_patch_tty_enable = false;
+   }
+ 
+diff --git a/src/core/settings.cpp b/src/core/settings.cpp
+index b0c7e98e..521f43f7 100644
+--- a/src/core/settings.cpp
++++ b/src/core/settings.cpp
+@@ -217,6 +217,7 @@ void Settings::Load(SettingsInterface& si)
+   use_old_mdec_routines = si.GetBoolValue("Hacks", "OldMDECRoutines", true);
+ 
+   bios_patch_fast_boot = si.GetBoolValue("BIOS", "PatchFastBoot", DEFAULT_FAST_BOOT_VALUE);
++  bios_fast_forward_boot = si.GetBoolValue("BIOS", "FastForwardBoot", false);
+ 
+   controller_analog_combo = si.GetIntValue("Controller", "AnalogCombo", 1);
+   controller_enable_rumble = si.GetBoolValue("Controller", "EnableRumble", true);
+diff --git a/src/core/settings.h b/src/core/settings.h
+index 2f56f086..c493a060 100644
+--- a/src/core/settings.h
++++ b/src/core/settings.h
+@@ -156,6 +156,7 @@ struct Settings
+ 
+   bool bios_patch_tty_enable = false;
+   bool bios_patch_fast_boot = false;
++  bool bios_fast_forward_boot = false;
+   bool enable_8mb_ram = false;
+ 
+   std::array<ControllerType, NUM_CONTROLLER_AND_CARD_PORTS> controller_types{};
+diff --git a/src/core/system.cpp b/src/core/system.cpp
+index 344bd48a..37005e80 100644
+--- a/src/core/system.cpp
++++ b/src/core/system.cpp
+@@ -100,7 +100,13 @@ static ConsoleRegion s_region = ConsoleRegion::NTSC_U;
+ TickCount g_ticks_per_second = MASTER_CLOCK;
+ static TickCount s_max_slice_ticks = MASTER_CLOCK / 10;
+ static u32 s_frame_number = 1;
+-static u32 s_internal_frame_number = 0;
++// This occupied an otherwise-unused save-state slot in the pinned core. Reusing it preserves the state format.
++static u32 s_display_start_write_count = 0;
++static bool s_fast_boot_path_active = false;
++
++#ifndef CONSOLEOS_BOOT_FAST_FORWARD_MAX_FRAMES
++#define CONSOLEOS_BOOT_FAST_FORWARD_MAX_FRAMES 0
++#endif
+ 
+ static std::string s_running_game_path;
+ static std::string s_running_game_code;
+@@ -181,6 +187,33 @@ void FrameDone()
+   CPU::g_state.downcount = 0;
+ }
+ 
++void NotifyDisplayStartWrite()
++{
++  if (s_display_start_write_count < std::numeric_limits<u32>::max())
++    s_display_start_write_count++;
++}
++
++static u32 GetBootFastForwardFrameLimit()
++{
++#if CONSOLEOS_BOOT_FAST_FORWARD_MAX_FRAMES > 0
++  return CONSOLEOS_BOOT_FAST_FORWARD_MAX_FRAMES;
++#else
++  return static_cast<u32>(std::ceil(std::max(GetThrottleFrequency(), 1.0f) * 30.0f));
++#endif
++}
++
++bool IsBootFastForwardActive()
++{
++  return g_settings.bios_fast_forward_boot && s_fast_boot_path_active && s_display_start_write_count == 0 &&
++         s_frame_number <= GetBootFastForwardFrameLimit();
++}
++
++bool DidBootFastForwardHitSafetyLimit()
++{
++  return g_settings.bios_fast_forward_boot && s_fast_boot_path_active && s_display_start_write_count == 0 &&
++         s_frame_number > GetBootFastForwardFrameLimit();
++}
++
+ const std::string& GetRunningCode()
+ {
+   return s_running_game_code;
+@@ -592,6 +625,7 @@ bool Boot(const SystemBootParameters& params)
+   s_state = State::Starting;
+   s_startup_cancelled.store(false);
+   s_region = g_settings.region;
++  s_fast_boot_path_active = false;
+ 
+   if (params.state_stream)
+   {
+@@ -601,6 +635,7 @@ bool Boot(const SystemBootParameters& params)
+       return false;
+     }
+ 
++    s_fast_boot_path_active = g_cdrom.HasMedia() && g_settings.bios_patch_fast_boot;
+     return true;
+   }
+ 
+@@ -731,6 +766,7 @@ bool Boot(const SystemBootParameters& params)
+       (params.override_fast_boot.has_value() ? params.override_fast_boot.value() : g_settings.bios_patch_fast_boot))
+   {
+     BIOS::PatchBIOSFastBoot(Bus::g_bios, Bus::BIOS_SIZE, bios_hash);
++    s_fast_boot_path_active = true;
+   }
+ 
+   // Good to go.
+@@ -817,6 +853,7 @@ void Shutdown()
+   s_running_game_path.clear();
+   s_running_game_title.clear();
+   s_cheat_list.reset();
++  s_fast_boot_path_active = false;
+   s_state = State::Shutdown;
+ 
+   g_host_interface->OnRunningGameChanged(s_running_game_path, nullptr, s_running_game_code, s_running_game_title);
+@@ -876,7 +913,7 @@ bool DoState(StateWrapper& sw, HostDisplayTexture** host_texture, bool update_di
+ 
+   sw.Do(&s_region);
+   sw.Do(&s_frame_number);
+-  sw.Do(&s_internal_frame_number);
++  sw.Do(&s_display_start_write_count);
+ 
+   if (!sw.DoMarker("CPU") || !CPU::DoState(sw))
+     return false;
+@@ -973,6 +1010,7 @@ void Reset()
+   g_mdec.Reset();
+   g_sio.Reset();
+   s_frame_number = 1;
++  s_display_start_write_count = 0;
+   TimingEvents::Reset();
+ 
+   g_gpu->ResetGraphicsAPIState();
+diff --git a/src/core/system.h b/src/core/system.h
+index a5b2f147..e89f25ba 100644
+--- a/src/core/system.h
++++ b/src/core/system.h
+@@ -90,6 +90,15 @@ bool InjectEXEFromBuffer(const void* buffer, u32 buffer_size, bool patch_loader
+ u32 GetFrameNumber();
+ void FrameDone();
+ 
++/// Records a GP1 display-start write. The count is reset by Reset() and persisted in save states.
++void NotifyDisplayStartWrite();
++
++/// Returns whether disc boot acceleration should run another emulated frame.
++bool IsBootFastForwardActive();
++
++/// Returns whether boot acceleration ended at its emulated-time safety bound.
++bool DidBootFastForwardHitSafetyLimit();
++
+ const std::string& GetRunningCode();
+ float GetThrottleFrequency();
+ 
+diff --git a/src/libretro/libretro_core_options.h b/src/libretro/libretro_core_options.h
+index b33380af..0e9928ca 100644
+--- a/src/libretro/libretro_core_options.h
++++ b/src/libretro/libretro_core_options.h
+@@ -144,6 +144,18 @@ struct retro_core_option_v2_definition option_defs_us[] = {
+      {NULL, NULL},
+    },
+    "false"},
++  {"swanstation_BIOS_FastForwardBoot",
++   "Fast Forward Boot",
++   NULL,
++   "Fast-forwards console startup until the game shows its first frame. Requires Fast Boot.",
++   NULL,
++   "console",
++   {
++     {"false", "Disabled"},
++     {"true", "Enabled"},
++     {NULL, NULL},
++   },
++   "false"},
+   {"swanstation_CDROM_RegionCheck",
+    "CD-ROM Region Check",
+    NULL,
+diff --git a/src/libretro/libretro_host_interface.cpp b/src/libretro/libretro_host_interface.cpp
+index 808000ec..d66831b7 100644
+--- a/src/libretro/libretro_host_interface.cpp
++++ b/src/libretro/libretro_host_interface.cpp
+@@ -1,5 +1,6 @@
+ #include "libretro_host_interface.h"
+ #include "common/byte_stream.h"
++#include "common/audio_stream.h"
+ #include "common/file_system.h"
+ #include "common/log.h"
+ #include "common/make_array.h"
+@@ -16,6 +17,7 @@
+ #include "core/negcon_rumble.h"
+ #include "core/pad.h"
+ #include "core/playstation_mouse.h"
++#include "core/spu.h"
+ #include "core/system.h"
+ #include "libretro_audio_stream.h"
+ #include "libretro_game_settings.h"
+@@ -705,7 +707,51 @@ void LibretroHostInterface::retro_run_frame()
+ 
+   UpdateControllers();
+ 
+-  System::RunFrame();
++  if (System::IsBootFastForwardActive())
++  {
++    if (!m_boot_fast_forward_audio_stream)
++    {
++      m_boot_fast_forward_audio_stream = AudioStream::CreateNullAudioStream();
++      if (!m_boot_fast_forward_audio_stream ||
++          !m_boot_fast_forward_audio_stream->Reconfigure(AUDIO_SAMPLE_RATE, AUDIO_SAMPLE_RATE, AUDIO_CHANNELS,
++                                                         AudioStream::DefaultBufferSize))
++      {
++        Log_ErrorPrintf("CONSOLEOS_BOOT_FF disabled: failed to create discard audio stream");
++        m_boot_fast_forward_audio_stream.reset();
++      }
++    }
++
++    if (m_boot_fast_forward_audio_stream)
++    {
++      Common::Timer slice_timer;
++      u32 emulated_frames = 0;
++      g_spu.SetAudioStream(m_boot_fast_forward_audio_stream.get());
++      do
++      {
++        System::RunFrame();
++        emulated_frames++;
++      } while (System::IsBootFastForwardActive() && slice_timer.GetTimeMilliseconds() < 12.0);
++      g_spu.SetAudioStream(m_audio_stream.get());
++
++      const double elapsed_ms = slice_timer.GetTimeMilliseconds();
++      Log_InfoPrintf("CONSOLEOS_BOOT_FF_SLICE frames=%u elapsed_ms=%.3f active=%d", emulated_frames, elapsed_ms,
++                     System::IsBootFastForwardActive() ? 1 : 0);
++      if (!System::IsBootFastForwardActive())
++      {
++        Log_InfoPrintf("CONSOLEOS_BOOT_FF_COMPLETE reason=%s frame=%u",
++                       System::DidBootFastForwardHitSafetyLimit() ? "safety-limit" : "display-start",
++                       System::GetFrameNumber());
++      }
++    }
++    else
++    {
++      System::RunFrame();
++    }
++  }
++  else
++  {
++    System::RunFrame();
++  }
+ 
+   const float aspect_ratio = m_display->GetDisplayAspectRatio();
+ 
+diff --git a/src/libretro/libretro_host_interface.h b/src/libretro/libretro_host_interface.h
+index e6a1b686..8204b56b 100644
+--- a/src/libretro/libretro_host_interface.h
++++ b/src/libretro/libretro_host_interface.h
+@@ -142,6 +142,8 @@ private:
+   bool m_rumble_interface_valid = false;
+   bool m_supports_input_bitmasks = false;
+ 
++  std::unique_ptr<AudioStream> m_boot_fast_forward_audio_stream;
++
+   DiskControlInfo m_disk_control_info = {};
+ };
+ 
+-- 
+2.50.1 (Apple Git-155)
+

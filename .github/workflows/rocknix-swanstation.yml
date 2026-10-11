@@ -1,0 +1,182 @@
+name: ROCKNIX RP5 ConsoleOS SwanStation
+
+on:
+  push:
+    branches:
+      - codex/retroarch-load-completion
+    paths:
+      - .github/workflows/rocknix-swanstation.yml
+      - rocknix/swanstation/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  swanstation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    container:
+      image: ubuntu:25.04@sha256:34e8533bf27ac50f60bec267f6ce18c9aeb9556574e1ec1a8ce89926d32ea8f3
+    env:
+      ROCKNIX_COMMIT: 1ebff24f36501fb6493beb2bf83bf2604536d9aa
+      SWANSTATION_COMMIT: 4d309c05fd7bdc503d91d267bd542edb8d192b09
+      ROCKNIX_RELEASE_URL: https://github.com/ROCKNIX/distribution/releases/download/20260901/ROCKNIX-SM8250.aarch64-20260901.tar
+      ROCKNIX_RELEASE_SHA256: 3c23a04b76a9237b4d824819d80cc83c98ce118d33e1bd979a2a68ff40f034cb
+      PATCH_PATH: rocknix/swanstation/0001-Add-bounded-clean-room-fast-forward-boot.patch
+      ARTIFACT_DIR: swanstation-artifact
+      TARGET_ROOT: rocknix-target-root
+    steps:
+      - name: Install pinned build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            binutils-aarch64-linux-gnu ca-certificates cmake curl file g++-aarch64-linux-gnu \
+            gcc-aarch64-linux-gnu git make ninja-build patch squashfs-tools xz-utils
+
+      - name: Check out ConsoleOS GPL sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Check out pinned ROCKNIX SwanStation recipe
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ROCKNIX/distribution
+          ref: 1ebff24f36501fb6493beb2bf83bf2604536d9aa
+          path: distribution
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /projects/ROCKNIX/packages/emulators/libretro/swanstation-lr/
+
+      - name: Check out pinned SwanStation source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: libretro/swanstation
+          ref: 4d309c05fd7bdc503d91d267bd542edb8d192b09
+          path: swanstation
+          persist-credentials: false
+
+      - name: Verify pinned inputs and derive cache key
+        id: inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          recipe=distribution/projects/ROCKNIX/packages/emulators/libretro/swanstation-lr/package.mk
+          grep -Fq 'PKG_VERSION="4d309c05fd7bdc503d91d267bd542edb8d192b09"' "$recipe"
+          grep -Fq 'PKG_BUILD_FLAGS="-lto"' "$recipe"
+          grep -Fq -- '-DCMAKE_BUILD_TYPE=Release -DBUILD_LIBRETRO_CORE=ON' "$recipe"
+          echo 'd5b0a949aaf18aa9c9891348c35bb0a855a10c810ea805b1216f1d78ae230ed5  '"$recipe" | sha256sum -c -
+          patch_sha=$(sha256sum "$PATCH_PATH" | awk '{print $1}')
+          recipe_sha=$(sha256sum rocknix/swanstation/build-standalone-aarch64.sh | awk '{print $1}')
+          printf 'patch_sha=%s\n' "$patch_sha" >> "$GITHUB_OUTPUT"
+          printf 'recipe_sha=%s\n' "$recipe_sha" >> "$GITHUB_OUTPUT"
+          printf 'cache_key=consoleos-swanstation-aarch64-%s-%s-%s-%s\n' \
+            "$SWANSTATION_COMMIT" "$ROCKNIX_COMMIT" "$patch_sha" "$recipe_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Restore exact cached SwanStation artifacts
+        id: artifact-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: swanstation-artifact
+          key: ${{ steps.inputs.outputs.cache_key }}
+
+      - name: Restore pinned ROCKNIX runtime root
+        if: steps.artifact-cache.outputs.cache-hit != 'true'
+        id: runtime-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: rocknix-target-root
+          key: rocknix-sm8250-runtime-${{ env.ROCKNIX_COMMIT }}-${{ env.ROCKNIX_RELEASE_SHA256 }}
+
+      - name: Extract checksum-verified ROCKNIX runtime root
+        if: steps.artifact-cache.outputs.cache-hit != 'true' && steps.runtime-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rocknix/retroarch/extract-rocknix-runtime.sh \
+            "$ROCKNIX_RELEASE_URL" "$ROCKNIX_RELEASE_SHA256" "$TARGET_ROOT"
+
+      - name: Build unpatched control
+        if: steps.artifact-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rocknix/swanstation/build-standalone-aarch64.sh swanstation swanstation-control
+
+      - name: Apply ConsoleOS clean-room patch
+        if: steps.artifact-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C swanstation apply --check "$GITHUB_WORKSPACE/$PATCH_PATH"
+          git -C swanstation apply "$GITHUB_WORKSPACE/$PATCH_PATH"
+
+      - name: Build product and forced-low-bound qualification cores
+        if: steps.artifact-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rocknix/swanstation/build-standalone-aarch64.sh swanstation "$ARTIFACT_DIR"
+          install -m 0644 "$ARTIFACT_DIR/BUILD-FLAGS.txt" "$ARTIFACT_DIR/BUILD-FLAGS-product.txt"
+          rocknix/swanstation/build-standalone-aarch64.sh swanstation swanstation-low-bound 2
+          install -m 0755 swanstation-low-bound/swanstation_libretro.so \
+            "$ARTIFACT_DIR/swanstation_libretro-low-bound.so"
+          install -m 0644 swanstation-low-bound/BUILD-FLAGS.txt \
+            "$ARTIFACT_DIR/BUILD-FLAGS-low-bound.txt"
+
+      - name: Verify ABI, exports and core-option delta
+        if: steps.artifact-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rocknix/swanstation/verify-rocknix-abi.sh \
+            "$TARGET_ROOT" swanstation-control/swanstation_libretro.so \
+            "$ARTIFACT_DIR/swanstation_libretro.so" "$ARTIFACT_DIR"
+          strings "$ARTIFACT_DIR/swanstation_libretro-low-bound.so" | \
+            grep -Fxq swanstation_BIOS_FastForwardBoot
+
+      - name: Complete artifact provenance
+        if: steps.artifact-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -m 0644 "$PATCH_PATH" "$ARTIFACT_DIR/"
+          install -m 0755 rocknix/swanstation/build-standalone-aarch64.sh \
+            rocknix/swanstation/verify-rocknix-abi.sh "$ARTIFACT_DIR/"
+          {
+            printf 'rocknix_commit=%s\n' "$ROCKNIX_COMMIT"
+            printf 'swanstation_commit=%s\n' "$SWANSTATION_COMMIT"
+            printf 'patch_sha256=%s\n' '${{ steps.inputs.outputs.patch_sha }}'
+            printf 'build_recipe_sha256=%s\n' '${{ steps.inputs.outputs.recipe_sha }}'
+            printf 'rocknix_release_sha256=%s\n' "$ROCKNIX_RELEASE_SHA256"
+            printf 'build_container=%s\n' 'ubuntu:25.04@sha256:34e8533bf27ac50f60bec267f6ce18c9aeb9556574e1ec1a8ce89926d32ea8f3'
+            printf 'build_mode=standalone-aarch64-cross-lto-off\n'
+            printf 'artifact_cache_key=%s\n' '${{ steps.inputs.outputs.cache_key }}'
+            printf 'device_smoke_required=true\n'
+          } > "$ARTIFACT_DIR/PROVENANCE"
+          find "$ARTIFACT_DIR" -maxdepth 1 -type f ! -name SHA256SUMS -print0 | \
+            LC_ALL=C sort -z | xargs -0 sha256sum > "$ARTIFACT_DIR/SHA256SUMS"
+
+      - name: Verify cached or newly built artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd "$ARTIFACT_DIR" && sha256sum -c SHA256SUMS)
+          file "$ARTIFACT_DIR/swanstation_libretro.so" | grep -Fq 'ARM aarch64'
+          file "$ARTIFACT_DIR/swanstation_libretro-low-bound.so" | grep -Fq 'ARM aarch64'
+          grep -Fxq 'abi_gate=pass' "$ARTIFACT_DIR/ABI-REPORT.txt"
+          grep -Fxq "patch_sha256=${{ steps.inputs.outputs.patch_sha }}" "$ARTIFACT_DIR/PROVENANCE"
+          cat "$ARTIFACT_DIR/SHA256SUMS"
+
+      - name: Upload SwanStation GPL artifacts and build records
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: consoleos-rocknix-sm8250-swanstation
+          retention-days: 14
+          compression-level: 0
+          if-no-files-found: error
+          path: swanstation-artifact/
