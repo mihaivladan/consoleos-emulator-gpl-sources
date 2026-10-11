@@ -38,12 +38,18 @@ fi
 
 allowed='libc.so.6 libm.so.6 libstdc++.so.6 libgcc_s.so.1'
 while IFS= read -r soname; do
+  if [ "$soname" = ld-linux-aarch64.so.1 ]; then
+    # GCC's AArch64 shared-object link adds the ELF interpreter to DT_NEEDED.
+    # Treat it as the target loader, not as an application-library dependency.
+    # The exact-set comparison above already proves the control has it too.
+    find "$target_root" \( -type f -o -type l \) -name "$soname" -print -quit | grep -q . || {
+      echo "::error title=SwanStation ABI::target runtime lacks $soname"
+      exit 1
+    }
+    continue
+  fi
   case " $allowed " in
     *" $soname "*) ;;
-    # GCC's AArch64 shared-object link adds the ELF interpreter to DT_NEEDED.
-    # Treat it as the target loader, not as an application-library dependency,
-    # and permit it only because the unpatched control has the identical entry.
-    *" ld-linux-aarch64.so.1 "*) ;;
     *) echo "::error title=SwanStation ABI::unexpected NEEDED soname: $soname"; exit 1 ;;
   esac
   find "$target_root" \( -type f -o -type l \) -name "$soname" -print -quit | grep -q . || {
