@@ -36,7 +36,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
   libminiupnpc-dev:arm64 libopenal-dev:arm64 libogg-dev:arm64 \
   libpipewire-0.3-dev:arm64 libpng-dev:arm64 libpulse-dev:arm64 \
   libsdl2-dev:arm64 libssl-dev:arm64 libudev-dev:arm64 \
-  libvorbis-dev:arm64 libvpx-dev:arm64 libvulkan-dev:arm64 \
+  libv4l-dev:arm64 libvorbis-dev:arm64 libvpx-dev:arm64 libvulkan-dev:arm64 \
   libwayland-dev:arm64 libxkbcommon-dev:arm64 liblzma-dev:arm64 \
   libavcodec-dev:arm64 libavformat-dev:arm64 libavutil-dev:arm64 \
   libswresample-dev:arm64 libswscale-dev:arm64 zlib1g-dev:arm64
