@@ -61,12 +61,22 @@ candidate_interpreter=$(aarch64-linux-gnu-readelf -l "$candidate" | \
   sed -n 's/.*Requesting program interpreter: \(.*\)]/\1/p')
 test "$candidate_interpreter" = "$stock_interpreter"
 
-qemu-aarch64-static -L "$target_root" "$stock" --features \
-  > "$report_dir/STOCK-FEATURES.txt"
-qemu-aarch64-static -L "$target_root" "$candidate" --features \
-  > "$report_dir/CANDIDATE-FEATURES.txt"
-diff -u "$report_dir/STOCK-FEATURES.txt" "$report_dir/CANDIDATE-FEATURES.txt" \
-  > "$report_dir/FEATURE-DIFF.txt"
+if ! qemu-aarch64-static -L "$target_root" "$stock" --features \
+    > "$report_dir/STOCK-FEATURES.txt"; then
+  echo 'stock ROCKNIX RetroArch failed under QEMU feature inspection' >&2
+  exit 1
+fi
+if ! qemu-aarch64-static -L "$target_root" "$candidate" --features \
+    > "$report_dir/CANDIDATE-FEATURES.txt"; then
+  echo 'candidate RetroArch failed under QEMU feature inspection' >&2
+  exit 1
+fi
+if ! diff -u "$report_dir/STOCK-FEATURES.txt" \
+    "$report_dir/CANDIDATE-FEATURES.txt" > "$report_dir/FEATURE-DIFF.txt"; then
+  echo 'RetroArch feature parity mismatch:' >&2
+  cat "$report_dir/FEATURE-DIFF.txt" >&2
+  exit 1
+fi
 
 {
   printf 'abi_gate=pass\n'
