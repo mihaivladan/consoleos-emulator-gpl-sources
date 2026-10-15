@@ -24,14 +24,6 @@ The workflows publish the stable artifacts
 `consoleos-rocknix-sm8250-swanstation`. A successful host build is not device
 acceptance; the component notes identify the remaining RP5 checks.
 
-## What is not included
-
-ConsoleOS itself is not open source. This repository does not contain its
-shell, runtime-session owner, emulator adapters, service coordination or
-product lifecycle logic. Those components communicate with the GPL programs
-at arm's length and are not needed to build or understand the modifications
-published here.
-
 ## License
 
 The repository is licensed under GPL-3.0. The included patches modify their
