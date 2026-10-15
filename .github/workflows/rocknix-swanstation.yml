@@ -169,6 +169,8 @@ jobs:
             printf 'rocknix_release_sha256=%s\n' "$ROCKNIX_RELEASE_SHA256"
             printf 'build_container=%s\n' 'ubuntu:25.04@sha256:34e8533bf27ac50f60bec267f6ce18c9aeb9556574e1ec1a8ce89926d32ea8f3'
             printf 'build_mode=standalone-aarch64-cross-lto-off\n'
+            printf 'source_repository=%s\n' "$GITHUB_REPOSITORY"
+            printf 'source_commit=%s\n' "$GITHUB_SHA"
             printf 'artifact_cache_key=%s\n' '${{ steps.inputs.outputs.cache_key }}'
             printf 'device_smoke_required=true\n'
           } > "$ARTIFACT_DIR/PROVENANCE"
@@ -185,6 +187,8 @@ jobs:
           file "$ARTIFACT_DIR/swanstation_libretro-low-bound.so" | grep -Fq 'ARM aarch64'
           grep -Fxq 'abi_gate=pass' "$ARTIFACT_DIR/ABI-REPORT.txt"
           grep -Fxq "patch_sha256=${{ steps.inputs.outputs.patch_sha }}" "$ARTIFACT_DIR/PROVENANCE"
+          grep -Fxq "source_repository=$GITHUB_REPOSITORY" "$ARTIFACT_DIR/PROVENANCE"
+          grep -Fxq "source_commit=$GITHUB_SHA" "$ARTIFACT_DIR/PROVENANCE"
           cat "$ARTIFACT_DIR/SHA256SUMS"
 
       - name: Upload SwanStation GPL artifacts and build records
