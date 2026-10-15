@@ -3,7 +3,7 @@ name: ROCKNIX RP5 ConsoleOS SwanStation
 on:
   push:
     branches:
-      - codex/retroarch-load-completion
+      - main
     paths:
       - .github/workflows/rocknix-swanstation.yml
       - rocknix/swanstation/**

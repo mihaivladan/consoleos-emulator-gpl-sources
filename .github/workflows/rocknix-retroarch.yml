@@ -3,7 +3,7 @@ name: ROCKNIX RP5 ConsoleOS RetroArch
 on:
   push:
     branches:
-      - codex/retroarch-load-completion
+      - main
     paths:
       - .github/workflows/rocknix-retroarch.yml
       - rocknix/retroarch/**
