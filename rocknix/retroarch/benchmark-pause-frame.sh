@@ -15,7 +15,8 @@ if [[ -z $retroarch_pid ]]; then
   echo 'RetroArch is not running; launch a game before benchmarking' >&2
   exit 1
 fi
-if [[ $(readlink /proc/self/ns/net) != $(readlink "/proc/$retroarch_pid/ns/net") ]]; then
+if [[ "$(readlink /proc/self/ns/net)" != \
+      "$(readlink "/proc/$retroarch_pid/ns/net")" ]]; then
   if [[ ${PAUSE_FRAME_NSENTERED:-0} == 1 ]]; then
     echo "network namespace mismatch; invoke with: nsenter -t $retroarch_pid -n -- $0" >&2
     exit 1

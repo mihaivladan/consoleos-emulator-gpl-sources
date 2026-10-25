@@ -36,13 +36,25 @@ PAUSE_FRAME_FAILED <generation> <reason>
 
 Malformed generations report generation 0. The bounded reasons are
 `invalid_arguments`, `no_game`, `unsupported_format`, `no_cpu_frame`,
-`allocation_failed`, `open_failed`, `write_failed`, and `rename_failed`.
+`gpu_readback_failed`, `allocation_failed`, `open_failed`, `write_failed`,
+and `rename_failed`.
 
-The experiment reads the lifetime-safe CPU frame cache already used by the
-normal screenshot pipeline. XRGB8888 is converted to RGBA8888. Native RGB565
-is copied without conversion. It intentionally does not add GPU/backend
-readback. If the RP5 returns `no_cpu_frame`, stop the experiment: adding a
-graphics-backend path is outside this benchmark.
+The command selects its source without changing the protocol:
+
+- a software-rendered cached frame uses the existing lifetime-safe CPU frame
+  callback. XRGB8888 is converted to RGBA8888; native RGB565 is copied without
+  conversion;
+- a hardware-rendered frame calls `screenshot_read_viewport()`, the small
+  shared helper factored from RetroArch's existing `take_screenshot_viewport()`
+  path. That helper dispatches the active video driver's existing
+  `read_viewport` callback. On glcore this is the existing glcore viewport
+  readback, not a second renderer-specific implementation. Its bottom-up
+  BGR24 result is flipped and converted to top-left RGBA8888 before publish.
+
+The experiment does not change glcore, any other video driver, or the PNG
+encoder. A failed hardware readback reports `gpu_readback_failed`; it does not
+fall back to compositor capture and never replaces the previous valid raw
+file.
 
 ## Raw file
 
@@ -67,8 +79,19 @@ The payload contains consecutive top-to-bottom rows with no padding. RGB565
 payload bytes are the core's native pixels and are not channel-converted. The
 prior valid `.raw` remains untouched on every failure.
 
-One log line records `readback_us`, `downsample_us`, `publish_us`, and
-`total_us`. Readback includes the required XRGB8888-to-RGBA8888 conversion.
+One log line records `source=cpu|gpu`, source/published dimensions, format,
+`pixels_us`, `gpu_readback_us`, `conversion_us`, `downsample_us`,
+`publish_us`, and `total_us`. `pixels_us` is command receipt to usable
+top-left pixels. `gpu_readback_us` is zero on the CPU path. Scale 2 reduces
+the published payload and future upload/blur work, but it is deliberately
+applied after the viewport readback and therefore does not reduce GPU
+readback cost.
+
+The qualified software-rendered SwanStation result that authorized this
+hardware checkpoint was 0.444 ms median / 0.759 ms maximum at 320x160 RGB565,
+0.278 ms median / 0.757 ms maximum at 160x80 RGB565, and 204.239 ms median /
+246.585 ms maximum for the complete PNG path. Those numbers do not predict
+hardware glcore performance; the rebuilt artifact still requires an RP5 run.
 
 ## RP5 benchmark
 
@@ -105,16 +128,16 @@ Do not replace `/usr/bin/retroarch` on disk. Stage the experimental artifact
 and script in tmpfs, verify hashes, then bind-mount the binary for one launch:
 
 ```sh
-install -m 0755 retroarch-pause-frame-rgb565-experiment \
-  /run/consoleos/retroarch-pause-frame-rgb565-experiment
+install -m 0755 retroarch-pause-frame-hardware-experiment \
+  /run/consoleos/retroarch-pause-frame-hardware-experiment
 install -m 0755 benchmark-pause-frame.sh \
   /run/consoleos/benchmark-pause-frame.sh
 install -m 0755 pause-frame-benchmark.py \
   /run/consoleos/pause-frame-benchmark.py
-sha256sum /run/consoleos/retroarch-pause-frame-rgb565-experiment \
+sha256sum /run/consoleos/retroarch-pause-frame-hardware-experiment \
   /run/consoleos/benchmark-pause-frame.sh \
   /run/consoleos/pause-frame-benchmark.py
-mount --bind /run/consoleos/retroarch-pause-frame-rgb565-experiment /usr/bin/retroarch
+mount --bind /run/consoleos/retroarch-pause-frame-hardware-experiment /usr/bin/retroarch
 ```
 
 Launch a game through the unchanged session after the bind mount. Roll back
@@ -122,7 +145,7 @@ without modifying the immutable image:
 
 ```sh
 umount /usr/bin/retroarch
-rm -f /run/consoleos/retroarch-pause-frame-rgb565-experiment \
+rm -f /run/consoleos/retroarch-pause-frame-hardware-experiment \
   /run/consoleos/benchmark-pause-frame.sh \
   /run/consoleos/pause-frame-benchmark.py \
   /run/consoleos/pause-frame.next /run/consoleos/pause-frame.raw

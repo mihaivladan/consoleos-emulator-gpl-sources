@@ -1,24 +1,18 @@
 diff --git a/command.c b/command.c
-index 9133736522..6128470ddb 100644
+index 9133736..83a95c0 100644
 --- a/command.c
 +++ b/command.c
-@@ -20,6 +20,11 @@
- #include <stdlib.h>
- #include <stddef.h>
- #include <locale.h>
+@@ -22,0 +23,5 @@
 +#if defined(__linux__)
 +#include <errno.h>
 +#include <unistd.h>
 +#include <features/features_cpu.h>
 +#endif
- #ifdef HAVE_NETWORKING
- #include <net/net_compat.h>
- #include <net/net_socket.h>
-@@ -912,6 +917,310 @@ bool command_get_load_state_status(command_t *cmd, const char *arg)
-    return true;
- }
--
-+
+@@ -70,0 +76,3 @@
++#ifdef HAVE_SCREENSHOTS
++#include "tasks/tasks_internal.h"
++#endif
+@@ -914,0 +923,390 @@ bool command_get_load_state_status(command_t *cmd, const char *arg)
 +#if defined(__linux__)
 +#define PAUSE_FRAME_NEXT "/run/consoleos/pause-frame.next"
 +#define PAUSE_FRAME_RAW  "/run/consoleos/pause-frame.raw"
@@ -50,6 +44,7 @@ index 9133736522..6128470ddb 100644
 +   unsigned format;
 +   const char *format_name;
 +   const char *failure;
++   retro_time_t conversion_us;
 +};
 +
 +static void pause_frame_reply(command_t *cmd, bool ready,
@@ -111,8 +106,8 @@ index 9133736522..6128470ddb 100644
 +   struct pause_frame_capture *capture =
 +      (struct pause_frame_capture*)userdata;
 +   unsigned y;
-+
 +   unsigned bytes_per_pixel = capture->bytes_per_pixel;
++   retro_time_t conversion_started = 0;
 +
 +   if (!data || !pause_frame_dimensions(width, height, bytes_per_pixel)
 +         || pitch < (size_t)width * bytes_per_pixel)
@@ -135,6 +130,8 @@ index 9133736522..6128470ddb 100644
 +         memcpy(dst, src, (size_t)width * bytes_per_pixel);
 +         continue;
 +      }
++      if (!conversion_started)
++         conversion_started = cpu_features_get_time_usec();
 +      for (x = 0; x < width; x++, dst += 4)
 +      {
 +         uint32_t pixel;
@@ -148,7 +145,71 @@ index 9133736522..6128470ddb 100644
 +   capture->width   = width;
 +   capture->height  = height;
 +   capture->failure = NULL;
++   if (conversion_started)
++      capture->conversion_us =
++            cpu_features_get_time_usec() - conversion_started;
 +}
++
++#if defined(HAVE_SCREENSHOTS)
++static bool pause_frame_read_gpu(struct pause_frame_capture *capture,
++      uint32_t runloop_flags, retro_time_t *readback_us)
++{
++   video_driver_state_t *video_st = video_state_get_ptr();
++   uint8_t *bgr = NULL;
++   unsigned width = 0;
++   unsigned height = 0;
++   size_t pitch = 0;
++   unsigned y;
++   retro_time_t started = cpu_features_get_time_usec();
++   retro_time_t pixels_ready;
++
++   /* Match the normal SCREENSHOT viewport preparation exactly. */
++   if (video_st->poke && video_st->poke->set_texture_enable)
++      video_st->poke->set_texture_enable(video_st->data, false, false);
++   if (!(runloop_flags & RUNLOOP_FLAG_IDLE))
++      video_driver_cached_frame();
++   if (!screenshot_read_viewport(&bgr, &width, &height, &pitch,
++            runloop_flags & RUNLOOP_FLAG_IDLE))
++      return false;
++   pixels_ready = cpu_features_get_time_usec();
++   *readback_us = pixels_ready - started;
++
++   if (!pause_frame_dimensions(width, height, 4U))
++   {
++      free(bgr);
++      return false;
++   }
++   capture->pixels = (uint8_t*)malloc((size_t)width * height * 4U);
++   if (!capture->pixels)
++   {
++      free(bgr);
++      capture->failure = "allocation_failed";
++      return false;
++   }
++   for (y = 0; y < height; y++)
++   {
++      const uint8_t *src = bgr + (size_t)(height - 1U - y) * pitch;
++      uint8_t *dst = capture->pixels + (size_t)y * width * 4U;
++      unsigned x;
++      for (x = 0; x < width; x++, src += 3, dst += 4)
++      {
++         dst[0] = src[2];
++         dst[1] = src[1];
++         dst[2] = src[0];
++         dst[3] = 0xffU;
++      }
++   }
++   free(bgr);
++   capture->width          = width;
++   capture->height         = height;
++   capture->bytes_per_pixel = 4U;
++   capture->format         = PAUSE_FRAME_FORMAT_RGBA8888;
++   capture->format_name    = "RGBA8888";
++   capture->failure        = NULL;
++   capture->conversion_us  = cpu_features_get_time_usec() - pixels_ready;
++   return true;
++}
++#endif
 +
 +static uint8_t *pause_frame_half(const uint8_t *source,
 +      unsigned width, unsigned height, unsigned bytes_per_pixel)
@@ -223,14 +284,18 @@ index 9133736522..6128470ddb 100644
 +   video_driver_state_t *video_st = video_state_get_ptr();
 +   runloop_state_t *runloop_st     = runloop_state_get_ptr();
 +   struct pause_frame_capture capture = {
-+      NULL, 0, 0, 0, 0, NULL, "no_cpu_frame"};
++      NULL, 0, 0, 0, 0, NULL, "no_cpu_frame", 0};
 +   uint8_t *published_pixels;
 +   uint64_t generation;
 +   unsigned scale;
 +   unsigned published_width;
 +   unsigned published_height;
++   bool cpu_format_supported = false;
++   bool hardware_frame;
++   const char *source_name = "cpu";
 +   const char *failure = "no_cpu_frame";
 +   retro_time_t received_at = cpu_features_get_time_usec();
++   retro_time_t gpu_readback_us = 0;
 +   retro_time_t pixels_at;
 +   retro_time_t downsampled_at;
 +   retro_time_t published_at;
@@ -249,27 +314,40 @@ index 9133736522..6128470ddb 100644
 +   }
 +   if (video_st && video_st->pix_fmt == RETRO_PIXEL_FORMAT_XRGB8888)
 +   {
++      cpu_format_supported    = true;
 +      capture.bytes_per_pixel = 4U;
 +      capture.format          = PAUSE_FRAME_FORMAT_RGBA8888;
 +      capture.format_name     = "RGBA8888";
 +   }
 +   else if (video_st && video_st->pix_fmt == RETRO_PIXEL_FORMAT_RGB565)
 +   {
++      cpu_format_supported    = true;
 +      capture.bytes_per_pixel = 2U;
 +      capture.format          = PAUSE_FRAME_FORMAT_RGB565;
 +      capture.format_name     = "RGB565";
 +   }
-+   else
++   hardware_frame = video_driver_cached_frame_is_hw_render();
++   if (cpu_format_supported && !hardware_frame)
++      video_driver_cached_frame_read(&capture, pause_frame_read);
++   if (!capture.pixels && hardware_frame)
 +   {
-+      pause_frame_reply(cmd, false, generation, "unsupported_format",
-+            0, 0, 0, NULL);
-+      return false;
++#if defined(HAVE_SCREENSHOTS)
++      if (!pause_frame_read_gpu(&capture, runloop_get_flags(),
++               &gpu_readback_us))
++         failure = capture.failure &&
++               !string_is_equal(capture.failure, "no_cpu_frame")
++               ? capture.failure : "gpu_readback_failed";
++      else
++         source_name = "gpu";
++#else
++      failure = "gpu_readback_failed";
++#endif
 +   }
-+
-+   video_driver_cached_frame_read(&capture, pause_frame_read);
 +   if (!capture.pixels)
 +   {
-+      pause_frame_reply(cmd, false, generation, capture.failure,
++      if (!hardware_frame)
++         failure = cpu_format_supported ? capture.failure : "unsupported_format";
++      pause_frame_reply(cmd, false, generation, failure,
 +            0, 0, 0, NULL);
 +      return false;
 +   }
@@ -309,12 +387,14 @@ index 9133736522..6128470ddb 100644
 +         published_width, published_height, capture.bytes_per_pixel,
 +         capture.format_name);
 +   RARCH_LOG("[ConsoleOS] pause_frame generation=%" PRIu64
-+         " source=%ux%u published=%ux%u format=%s"
-+         " readback_us=%" PRId64 " downsample_us=%" PRId64
++         " source=%s source_dims=%ux%u published=%ux%u format=%s"
++         " pixels_us=%" PRId64 " gpu_readback_us=%" PRId64
++         " conversion_us=%" PRId64 " downsample_us=%" PRId64
 +         " publish_us=%" PRId64 " total_us=%" PRId64 "\n",
-+         generation, capture.width, capture.height,
++         generation, source_name, capture.width, capture.height,
 +         published_width, published_height, capture.format_name,
-+         pixels_at - received_at, downsampled_at - pixels_at,
++         pixels_at - received_at, gpu_readback_us, capture.conversion_us,
++         downsampled_at - pixels_at,
 +         published_at - downsampled_at, published_at - received_at);
 +   if (published_pixels != capture.pixels)
 +      free(published_pixels);
@@ -323,31 +403,93 @@ index 9133736522..6128470ddb 100644
 +}
 +#endif
 +
- bool command_play_replay_slot(command_t *cmd, const char *arg)
- {
- #ifdef HAVE_BSV_MOVIE
 diff --git a/command.h b/command.h
-index d50c6c8309..76d35d01ea 100644
+index d50c6c8..76d35d0 100644
 --- a/command.h
 +++ b/command.h
-@@ -436,6 +436,9 @@ bool command_get_config_param(command_t *cmd, const char* arg);
- bool command_show_osd_msg(command_t *cmd, const char* arg);
- bool command_load_state_slot(command_t *cmd, const char* arg);
- bool command_get_load_state_status(command_t *cmd, const char* arg);
+@@ -438,0 +439,3 @@ bool command_get_load_state_status(command_t *cmd, const char* arg);
 +#if defined(__linux__)
 +bool command_consoleos_pause_frame(command_t *cmd, const char* arg);
 +#endif
- bool command_save_state_slot(command_t* cmd, const char* arg);
- bool command_play_replay_slot(command_t *cmd, const char* arg);
- bool command_seek_replay(command_t *cmd, const char *arg);
-@@ -468,6 +471,9 @@ static const struct cmd_action_map action_map[] = {
--
-+
-    { "LOAD_STATE_SLOT",command_load_state_slot, "<slot number>"},
-    { "GET_LOAD_STATE_STATUS",command_get_load_state_status, "No argument"},
+@@ -470,0 +474,3 @@ static const struct cmd_action_map action_map[] = {
 +#if defined(__linux__)
 +   { "CONSOLEOS_PAUSE_FRAME",command_consoleos_pause_frame, "<generation> <scale>"},
 +#endif
-    { "SAVE_STATE_SLOT",command_save_state_slot, "<slot number>"},
-    { "PLAY_REPLAY_SLOT",command_play_replay_slot, "<slot number>"},
-    { "SEEK_REPLAY",command_seek_replay, "<frame number>"},
+diff --git a/tasks/task_screenshot.c b/tasks/task_screenshot.c
+index e32fad6..7168c3b 100644
+--- a/tasks/task_screenshot.c
++++ b/tasks/task_screenshot.c
+@@ -526,8 +526,3 @@ static bool screenshot_dump(
+-static bool take_screenshot_viewport(
+-      const char *screenshot_dir,
+-      const char *name_base,
+-      bool savestate,
+-      uint32_t runloop_flags,
+-      bool fullpath,
+-      bool use_thread,
+-      unsigned pixel_format_type)
++bool screenshot_read_viewport(uint8_t **out_buffer,
++      unsigned *out_width, unsigned *out_height, size_t *out_pitch,
++      bool is_idle)
+@@ -538,0 +534,5 @@ static bool take_screenshot_viewport(
++   if (!out_buffer || !out_width || !out_height || !out_pitch
++         || !video_st || !video_st->current_video
++         || !video_st->current_video->read_viewport)
++      return false;
++
+@@ -555 +555 @@ static bool take_screenshot_viewport(
+-            video_st->data, buffer, runloop_flags & RUNLOOP_FLAG_IDLE)))
++            video_st->data, buffer, is_idle)))
+@@ -563,8 +563,5 @@ static bool take_screenshot_viewport(
+-      /* Data read from viewport is in bottom-up order, suitable for BMP. */
+-      if (screenshot_dump(screenshot_dir,
+-               name_base,
+-               buffer, vp.width, vp.height,
+-               vp.width * 3, true, buffer,
+-               savestate, runloop_flags, fullpath, use_thread,
+-               pixel_format_type))
+-         return true;
++      *out_buffer = buffer;
++      *out_width  = vp.width;
++      *out_height = vp.height;
++      *out_pitch  = vp.width * 3U;
++      return true;
+@@ -576,0 +574,28 @@ static bool take_screenshot_viewport(
++static bool take_screenshot_viewport(
++      const char *screenshot_dir,
++      const char *name_base,
++      bool savestate,
++      uint32_t runloop_flags,
++      bool fullpath,
++      bool use_thread,
++      unsigned pixel_format_type)
++{
++   uint8_t *buffer = NULL;
++   unsigned width = 0;
++   unsigned height = 0;
++   size_t pitch = 0;
++
++   if (!screenshot_read_viewport(&buffer, &width, &height, &pitch,
++            runloop_flags & RUNLOOP_FLAG_IDLE))
++      return false;
++
++   /* Data read from viewport is in bottom-up BGR24 order. */
++   if (screenshot_dump(screenshot_dir, name_base, buffer, width, height,
++            (int)pitch, true, buffer, savestate, runloop_flags,
++            fullpath, use_thread, pixel_format_type))
++      return true;
++
++   free(buffer);
++   return false;
++}
++
+diff --git a/tasks/tasks_internal.h b/tasks/tasks_internal.h
+index 5876be8..710c28f 100644
+--- a/tasks/tasks_internal.h
++++ b/tasks/tasks_internal.h
+@@ -257,0 +258,5 @@ bool take_screenshot(
++/* Returns the normal screenshot pipeline's bottom-up BGR24 viewport readback.
++ * The caller owns *buffer and must free it. */
++bool screenshot_read_viewport(uint8_t **buffer,
++      unsigned *width, unsigned *height, size_t *pitch, bool is_idle);
++
