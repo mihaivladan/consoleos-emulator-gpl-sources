@@ -187,4 +187,4 @@ jobs:
           retention-days: 14
           compression-level: 0
           if-no-files-found: error
-          path: retroarch-pause-frame-artifact/
+          path: ${{ env.ARTIFACT_DIR }}/
