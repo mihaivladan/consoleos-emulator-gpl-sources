@@ -24,7 +24,7 @@ jobs:
       BUILD_CONTAINER: ubuntu:25.04@sha256:34e8533bf27ac50f60bec267f6ce18c9aeb9556574e1ec1a8ce89926d32ea8f3
       CORRELATED_PATCH: rocknix/retroarch/0001-consoleos-correlated-load-completion.patch
       EXPERIMENT_PATCH: rocknix/retroarch/0002-consoleos-pause-frame-raw-benchmark.patch
-      ARTIFACT_DIR: retroarch-pause-frame-artifact
+      ARTIFACT_DIR: retroarch-pause-frame-rgb565-artifact
       TARGET_ROOT: rocknix-target-root
     steps:
       - name: Check out ConsoleOS GPL sources
@@ -120,7 +120,7 @@ jobs:
             "$BUILD_CONTAINER" \
             chown -R "$(id -u):$(id -g)" "/work/$ARTIFACT_DIR"
           mv "$ARTIFACT_DIR/retroarch" \
-            "$ARTIFACT_DIR/retroarch-pause-frame-experiment"
+            "$ARTIFACT_DIR/retroarch-pause-frame-rgb565-experiment"
 
       - name: Complete experimental artifact provenance
         if: steps.artifact-cache.outputs.cache-hit != 'true'
@@ -130,6 +130,7 @@ jobs:
           install -m 0644 "$CORRELATED_PATCH" "$EXPERIMENT_PATCH" \
             rocknix/retroarch/PAUSE-FRAME-BENCHMARK.md "$ARTIFACT_DIR/"
           install -m 0755 rocknix/retroarch/benchmark-pause-frame.sh \
+            rocknix/retroarch/pause-frame-benchmark.py \
             rocknix/retroarch/build-in-container.sh \
             rocknix/retroarch/build-standalone-aarch64.sh \
             rocknix/retroarch/extract-rocknix-runtime.sh \
@@ -156,7 +157,10 @@ jobs:
         run: |
           set -euo pipefail
           (cd "$ARTIFACT_DIR" && sha256sum -c SHA256SUMS)
-          binary="$ARTIFACT_DIR/retroarch-pause-frame-experiment"
+          bash -n "$ARTIFACT_DIR/benchmark-pause-frame.sh"
+          python3 -c 'import pathlib,sys; p=pathlib.Path(sys.argv[1]); compile(p.read_text(), str(p), "exec")' \
+            "$ARTIFACT_DIR/pause-frame-benchmark.py"
+          binary="$ARTIFACT_DIR/retroarch-pause-frame-rgb565-experiment"
           file "$binary" | grep -Fq 'ARM aarch64'
           strings "$binary" > /tmp/retroarch-pause-frame.strings
           grep -Fxq 'GET_LOAD_STATE_STATUS' /tmp/retroarch-pause-frame.strings
@@ -164,6 +168,8 @@ jobs:
           grep -Fxq 'CONSOLEOS_PAUSE_FRAME' /tmp/retroarch-pause-frame.strings
           grep -Fq 'PAUSE_FRAME_READY' /tmp/retroarch-pause-frame.strings
           grep -Fq 'PAUSE_FRAME_FAILED' /tmp/retroarch-pause-frame.strings
+          grep -Fxq 'RGBA8888' /tmp/retroarch-pause-frame.strings
+          grep -Fxq 'RGB565' /tmp/retroarch-pause-frame.strings
           grep -Fq '/run/consoleos/pause-frame.next' /tmp/retroarch-pause-frame.strings
           grep -Fq '/run/consoleos/pause-frame.raw' /tmp/retroarch-pause-frame.strings
           grep -Fxq "rocknix_commit=$ROCKNIX_COMMIT" "$ARTIFACT_DIR/PROVENANCE"
@@ -177,7 +183,7 @@ jobs:
       - name: Upload separately named experimental artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: consoleos-rocknix-sm8250-retroarch-pause-frame-experiment
+          name: consoleos-rocknix-sm8250-retroarch-pause-frame-rgb565-experiment
           retention-days: 14
           compression-level: 0
           if-no-files-found: error

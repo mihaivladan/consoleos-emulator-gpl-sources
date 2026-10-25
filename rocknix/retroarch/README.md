@@ -53,6 +53,6 @@ by the ConsoleOS image build.
 The separate [raw pause-frame benchmark](PAUSE-FRAME-BENCHMARK.md) is an
 explicitly non-accepted experiment. Its second patch and workflow preserve the
 same pinned inputs and correlated-load behavior, but publish only the distinct
-`consoleos-rocknix-sm8250-retroarch-pause-frame-experiment` artifact. The
+`consoleos-rocknix-sm8250-retroarch-pause-frame-rgb565-experiment` artifact. The
 stable workflow and artifact are unchanged.
 

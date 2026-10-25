@@ -8,8 +8,25 @@ raw=/run/consoleos/pause-frame.raw
 next=/run/consoleos/pause-frame.next
 screenshot_dir=${SCREENSHOT_DIR:?set SCREENSHOT_DIR to the RetroArch PNG directory}
 samples=${SAMPLES:-10}
+helper=${PAUSE_FRAME_HELPER:-$(dirname "$0")/pause-frame-benchmark.py}
+
+retroarch_pid=$(pgrep -xo retroarch || true)
+if [[ -z $retroarch_pid ]]; then
+  echo 'RetroArch is not running; launch a game before benchmarking' >&2
+  exit 1
+fi
+if [[ $(readlink /proc/self/ns/net) != $(readlink "/proc/$retroarch_pid/ns/net") ]]; then
+  if [[ ${PAUSE_FRAME_NSENTERED:-0} == 1 ]]; then
+    echo "network namespace mismatch; invoke with: nsenter -t $retroarch_pid -n -- $0" >&2
+    exit 1
+  fi
+  export PAUSE_FRAME_NSENTERED=1
+  exec nsenter -t "$retroarch_pid" -n -- "$0" "$@"
+fi
+
 work=$(mktemp -d /run/consoleos/pause-frame-benchmark.XXXXXX)
 trap 'rm -rf "$work"' EXIT INT TERM
+[[ -x $helper ]] || { echo "missing Python helper: $helper" >&2; exit 1; }
 
 now_us() {
   local value
@@ -18,20 +35,11 @@ now_us() {
 }
 
 send_reply() {
-  local command=$1 reply
-  exec 3<>"/dev/udp/$host/$port"
-  printf '%s\n' "$command" >&3
-  if ! IFS= read -r -t 5 reply <&3; then
-    exec 3>&- 3<&-
-    echo "no reply for: $command" >&2
-    return 1
-  fi
-  exec 3>&- 3<&-
-  printf '%s\n' "$reply"
+  "$helper" udp "$host" "$port" "$1" "$2"
 }
 
 send_no_reply() {
-  printf '%s\n' "$1" >"/dev/udp/$host/$port"
+  "$helper" udp "$host" "$port" "$1" -
 }
 
 field32() {
@@ -43,8 +51,9 @@ field64() {
 }
 
 verify_raw() {
-  local expected_generation=$1
+  local expected_generation=$1 reply=$2
   local magic version header generation width height stride format orientation payload size
+  local bytes_per_pixel format_name status reply_generation reply_width reply_height reply_stride reply_format
   magic=$(dd if="$raw" bs=1 count=8 2>/dev/null)
   version=$(field32 8)
   header=$(field32 12)
@@ -59,10 +68,19 @@ verify_raw() {
   [[ $magic == COSPFRAW ]]
   [[ $version == 1 && $header == 56 ]]
   [[ $generation == "$expected_generation" ]]
-  [[ $width -gt 0 && $height -gt 0 && $stride -eq width*4 ]]
-  [[ $format == 1 && $orientation == 1 ]]
+  case $format in
+    1) bytes_per_pixel=4; format_name=RGBA8888 ;;
+    2) bytes_per_pixel=2; format_name=RGB565 ;;
+    *) return 1 ;;
+  esac
+  [[ $width -gt 0 && $height -gt 0 && $stride -eq width*bytes_per_pixel ]]
+  [[ $orientation == 1 ]]
   [[ $payload -eq stride*height && $size -eq header+payload ]]
   [[ ! -e $next ]]
+  read -r status reply_generation reply_width reply_height reply_stride reply_format <<<"$reply"
+  [[ $status == PAUSE_FRAME_READY && $reply_generation == "$generation" ]]
+  [[ $reply_width == "$width" && $reply_height == "$height" ]]
+  [[ $reply_stride == "$stride" && $reply_format == "$format_name" ]]
 }
 
 capture_total_us() {
@@ -90,9 +108,9 @@ run_raw_set() {
   for ((i=1; i<=samples; i++)); do
     rm -f "$raw" "$next"
     generation=$((100000 + scale*1000 + i))
-    reply=$(send_reply "CONSOLEOS_PAUSE_FRAME $generation $scale")
-    [[ $reply == "PAUSE_FRAME_READY $generation "*" RGBA8888" ]]
-    verify_raw "$generation"
+    reply=$(send_reply "CONSOLEOS_PAUSE_FRAME $generation $scale" \
+      "PAUSE_FRAME_READY $generation [1-9][0-9]* [1-9][0-9]* [1-9][0-9]* (RGBA8888|RGB565)")
+    verify_raw "$generation" "$reply"
     total=$(capture_total_us "$generation")
     [[ $total =~ ^[0-9]+$ ]]
     printf '%s\n' "$total" >>"$work/$label"
@@ -102,21 +120,15 @@ run_raw_set() {
 }
 
 run_png_set() {
-  local i marker before after png
+  local i snapshot before after png
   : >"$work/png"
   for ((i=1; i<=samples; i++)); do
-    marker="$work/png-marker-$i"
-    touch "$marker"
+    snapshot="$work/png-before-$i.json"
+    "$helper" snapshot "$screenshot_dir" "$snapshot"
     before=$(now_us)
     send_no_reply SCREENSHOT
-    png=
-    for _ in {1..500}; do
-      png=$(find "$screenshot_dir" -type f -name '*.png' -newer "$marker" \
-        -size +56c -print -quit)
-      [[ -n $png ]] && break
-      sleep 0.01
-    done
-    [[ -n $png ]]
+    png=$("$helper" wait-png "$screenshot_dir" "$snapshot")
+    [[ -s $png ]]
     after=$(now_us)
     printf '%s\n' "$((after-before))" >>"$work/png"
   done
@@ -132,20 +144,22 @@ run_raw_set 2 raw_half_width_height
 
 # A rejected command must not replace the last valid publication.
 before_hash=$(sha256sum "$raw" | awk '{print $1}')
-reply=$(send_reply 'CONSOLEOS_PAUSE_FRAME 700001 3')
+reply=$(send_reply 'CONSOLEOS_PAUSE_FRAME 700001 3' \
+  'PAUSE_FRAME_FAILED 700001 invalid_arguments')
 [[ $reply == 'PAUSE_FRAME_FAILED 700001 invalid_arguments' ]]
 [[ $(sha256sum "$raw" | awk '{print $1}') == "$before_hash" ]]
 [[ ! -e $next ]]
-reply=$(send_reply 'CONSOLEOS_PAUSE_FRAME invalid 1')
+reply=$(send_reply 'CONSOLEOS_PAUSE_FRAME invalid 1' \
+  'PAUSE_FRAME_FAILED 0 invalid_arguments')
 [[ $reply == 'PAUSE_FRAME_FAILED 0 invalid_arguments' ]]
 [[ $(sha256sum "$raw" | awk '{print $1}') == "$before_hash" ]]
 [[ ! -e $next ]]
 
 # Two captures without removing the destination exercise atomic replacement.
 for generation in 800001 800002; do
-  reply=$(send_reply "CONSOLEOS_PAUSE_FRAME $generation 2")
-  [[ $reply == "PAUSE_FRAME_READY $generation "*" RGBA8888" ]]
-  verify_raw "$generation"
+  reply=$(send_reply "CONSOLEOS_PAUSE_FRAME $generation 2" \
+    "PAUSE_FRAME_READY $generation [1-9][0-9]* [1-9][0-9]* [1-9][0-9]* (RGBA8888|RGB565)")
+  verify_raw "$generation" "$reply"
 done
 
 run_png_set
@@ -156,7 +170,8 @@ if [[ ${CHECK_NO_GAME_FAILURE:-0} == 1 ]]; then
   before_hash=$(sha256sum "$raw" | awk '{print $1}')
   send_no_reply CLOSE_CONTENT
   sleep 1
-  reply=$(send_reply 'CONSOLEOS_PAUSE_FRAME 900001 1')
+  reply=$(send_reply 'CONSOLEOS_PAUSE_FRAME 900001 1' \
+    'PAUSE_FRAME_FAILED 900001 no_game')
   [[ $reply == 'PAUSE_FRAME_FAILED 900001 no_game' ]]
   [[ $(sha256sum "$raw" | awk '{print $1}') == "$before_hash" ]]
   [[ ! -e $next ]]

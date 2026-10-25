@@ -1,5 +1,5 @@
 diff --git a/command.c b/command.c
-index 9133736522..30183545c7 100644
+index 9133736522..6128470ddb 100644
 --- a/command.c
 +++ b/command.c
 @@ -20,6 +20,11 @@
@@ -14,7 +14,7 @@ index 9133736522..30183545c7 100644
  #ifdef HAVE_NETWORKING
  #include <net/net_compat.h>
  #include <net/net_socket.h>
-@@ -912,6 +917,271 @@ bool command_get_load_state_status(command_t *cmd, const char *arg)
+@@ -912,6 +917,310 @@ bool command_get_load_state_status(command_t *cmd, const char *arg)
     return true;
  }
 -
@@ -23,6 +23,7 @@ index 9133736522..30183545c7 100644
 +#define PAUSE_FRAME_NEXT "/run/consoleos/pause-frame.next"
 +#define PAUSE_FRAME_RAW  "/run/consoleos/pause-frame.raw"
 +#define PAUSE_FRAME_FORMAT_RGBA8888 1U
++#define PAUSE_FRAME_FORMAT_RGB565 2U
 +#define PAUSE_FRAME_ORIENTATION_TOP_LEFT 1U
 +
 +struct pause_frame_header
@@ -45,18 +46,23 @@ index 9133736522..30183545c7 100644
 +   uint8_t *pixels;
 +   unsigned width;
 +   unsigned height;
++   unsigned bytes_per_pixel;
++   unsigned format;
++   const char *format_name;
 +   const char *failure;
 +};
 +
 +static void pause_frame_reply(command_t *cmd, bool ready,
 +      uint64_t generation, const char *detail,
-+      unsigned width, unsigned height)
++      unsigned width, unsigned height, unsigned bytes_per_pixel,
++      const char *format_name)
 +{
 +   char reply[160];
 +   size_t len = ready
 +         ? snprintf(reply, sizeof(reply),
-+               "PAUSE_FRAME_READY %" PRIu64 " %u %u %u RGBA8888\n",
-+               generation, width, height, width * 4U)
++               "PAUSE_FRAME_READY %" PRIu64 " %u %u %u %s\n",
++               generation, width, height, width * bytes_per_pixel,
++               format_name)
 +         : snprintf(reply, sizeof(reply),
 +               "PAUSE_FRAME_FAILED %" PRIu64 " %s\n",
 +               generation, detail ? detail : "unknown");
@@ -91,10 +97,12 @@ index 9133736522..30183545c7 100644
 +   return true;
 +}
 +
-+static bool pause_frame_dimensions(unsigned width, unsigned height)
++static bool pause_frame_dimensions(unsigned width, unsigned height,
++      unsigned bytes_per_pixel)
 +{
-+   return width && height && width <= SIZE_MAX / 4U
-+         && height <= SIZE_MAX / ((size_t)width * 4U);
++   return width && height && bytes_per_pixel
++         && width <= SIZE_MAX / bytes_per_pixel
++         && height <= SIZE_MAX / ((size_t)width * bytes_per_pixel);
 +}
 +
 +static void pause_frame_read(void *userdata, const void *data,
@@ -104,10 +112,13 @@ index 9133736522..30183545c7 100644
 +      (struct pause_frame_capture*)userdata;
 +   unsigned y;
 +
-+   if (!data || !pause_frame_dimensions(width, height)
-+         || pitch < (size_t)width * 4U)
++   unsigned bytes_per_pixel = capture->bytes_per_pixel;
++
++   if (!data || !pause_frame_dimensions(width, height, bytes_per_pixel)
++         || pitch < (size_t)width * bytes_per_pixel)
 +      return;
-+   capture->pixels = (uint8_t*)malloc((size_t)width * height * 4U);
++   capture->pixels = (uint8_t*)malloc(
++         (size_t)width * height * bytes_per_pixel);
 +   if (!capture->pixels)
 +   {
 +      capture->failure = "allocation_failed";
@@ -116,8 +127,14 @@ index 9133736522..30183545c7 100644
 +   for (y = 0; y < height; y++)
 +   {
 +      const uint8_t *src = (const uint8_t*)data + (size_t)y * pitch;
-+      uint8_t *dst = capture->pixels + (size_t)y * width * 4U;
++      uint8_t *dst = capture->pixels
++            + (size_t)y * width * bytes_per_pixel;
 +      unsigned x;
++      if (capture->format == PAUSE_FRAME_FORMAT_RGB565)
++      {
++         memcpy(dst, src, (size_t)width * bytes_per_pixel);
++         continue;
++      }
 +      for (x = 0; x < width; x++, dst += 4)
 +      {
 +         uint32_t pixel;
@@ -134,7 +151,7 @@ index 9133736522..30183545c7 100644
 +}
 +
 +static uint8_t *pause_frame_half(const uint8_t *source,
-+      unsigned width, unsigned height)
++      unsigned width, unsigned height, unsigned bytes_per_pixel)
 +{
 +   unsigned out_width  = width / 2U;
 +   unsigned out_height = height / 2U;
@@ -143,30 +160,34 @@ index 9133736522..30183545c7 100644
 +
 +   if (!out_width || !out_height)
 +      return NULL;
-+   output = (uint8_t*)malloc((size_t)out_width * out_height * 4U);
++   output = (uint8_t*)malloc(
++         (size_t)out_width * out_height * bytes_per_pixel);
 +   if (!output)
 +      return NULL;
 +   for (y = 0; y < out_height; y++)
 +   {
-+      const uint8_t *src = source + (size_t)(y * 2U) * width * 4U;
-+      uint8_t *dst = output + (size_t)y * out_width * 4U;
++      const uint8_t *src = source
++            + (size_t)(y * 2U) * width * bytes_per_pixel;
++      uint8_t *dst = output + (size_t)y * out_width * bytes_per_pixel;
 +      unsigned x;
 +      for (x = 0; x < out_width; x++)
-+         memcpy(dst + (size_t)x * 4U, src + (size_t)(x * 2U) * 4U, 4U);
++         memcpy(dst + (size_t)x * bytes_per_pixel,
++               src + (size_t)(x * 2U) * bytes_per_pixel,
++               bytes_per_pixel);
 +   }
 +   return output;
 +}
 +
 +static bool pause_frame_publish(uint64_t generation,
 +      const uint8_t *pixels, unsigned width, unsigned height,
-+      const char **failure)
++      unsigned bytes_per_pixel, unsigned format, const char **failure)
 +{
 +   struct pause_frame_header header = {
 +      {'C','O','S','P','F','R','A','W'}, 1U,
 +      sizeof(struct pause_frame_header), generation,
-+      width, height, width * 4U, PAUSE_FRAME_FORMAT_RGBA8888,
++      width, height, width * bytes_per_pixel, format,
 +      PAUSE_FRAME_ORIENTATION_TOP_LEFT, 0U,
-+      (uint64_t)width * height * 4U
++      (uint64_t)width * height * bytes_per_pixel
 +   };
 +   FILE *file;
 +   bool okay;
@@ -201,7 +222,8 @@ index 9133736522..30183545c7 100644
 +{
 +   video_driver_state_t *video_st = video_state_get_ptr();
 +   runloop_state_t *runloop_st     = runloop_state_get_ptr();
-+   struct pause_frame_capture capture = {NULL, 0, 0, "no_cpu_frame"};
++   struct pause_frame_capture capture = {
++      NULL, 0, 0, 0, 0, NULL, "no_cpu_frame"};
 +   uint8_t *published_pixels;
 +   uint64_t generation;
 +   unsigned scale;
@@ -216,24 +238,39 @@ index 9133736522..30183545c7 100644
 +   unlink(PAUSE_FRAME_NEXT);
 +   if (!pause_frame_parse(arg, &generation, &scale))
 +   {
-+      pause_frame_reply(cmd, false, generation, "invalid_arguments", 0, 0);
++      pause_frame_reply(cmd, false, generation, "invalid_arguments",
++            0, 0, 0, NULL);
 +      return false;
 +   }
 +   if (!(runloop_st->current_core.flags & RETRO_CORE_FLAG_GAME_LOADED))
 +   {
-+      pause_frame_reply(cmd, false, generation, "no_game", 0, 0);
++      pause_frame_reply(cmd, false, generation, "no_game", 0, 0, 0, NULL);
 +      return false;
 +   }
-+   if (!video_st || video_st->pix_fmt != RETRO_PIXEL_FORMAT_XRGB8888)
++   if (video_st && video_st->pix_fmt == RETRO_PIXEL_FORMAT_XRGB8888)
 +   {
-+      pause_frame_reply(cmd, false, generation, "unsupported_format", 0, 0);
++      capture.bytes_per_pixel = 4U;
++      capture.format          = PAUSE_FRAME_FORMAT_RGBA8888;
++      capture.format_name     = "RGBA8888";
++   }
++   else if (video_st && video_st->pix_fmt == RETRO_PIXEL_FORMAT_RGB565)
++   {
++      capture.bytes_per_pixel = 2U;
++      capture.format          = PAUSE_FRAME_FORMAT_RGB565;
++      capture.format_name     = "RGB565";
++   }
++   else
++   {
++      pause_frame_reply(cmd, false, generation, "unsupported_format",
++            0, 0, 0, NULL);
 +      return false;
 +   }
 +
 +   video_driver_cached_frame_read(&capture, pause_frame_read);
 +   if (!capture.pixels)
 +   {
-+      pause_frame_reply(cmd, false, generation, capture.failure, 0, 0);
++      pause_frame_reply(cmd, false, generation, capture.failure,
++            0, 0, 0, NULL);
 +      return false;
 +   }
 +   pixels_at = cpu_features_get_time_usec();
@@ -246,35 +283,37 @@ index 9133736522..30183545c7 100644
 +      published_width  /= 2U;
 +      published_height /= 2U;
 +      published_pixels = pause_frame_half(capture.pixels,
-+            capture.width, capture.height);
++            capture.width, capture.height, capture.bytes_per_pixel);
 +      if (!published_pixels)
 +      {
 +         free(capture.pixels);
 +         pause_frame_reply(cmd, false, generation,
-+               "allocation_failed", 0, 0);
++               "allocation_failed", 0, 0, 0, NULL);
 +         return false;
 +      }
 +   }
 +   downsampled_at = cpu_features_get_time_usec();
 +
 +   if (!pause_frame_publish(generation, published_pixels,
-+            published_width, published_height, &failure))
++            published_width, published_height, capture.bytes_per_pixel,
++            capture.format, &failure))
 +   {
 +      if (published_pixels != capture.pixels)
 +         free(published_pixels);
 +      free(capture.pixels);
-+      pause_frame_reply(cmd, false, generation, failure, 0, 0);
++      pause_frame_reply(cmd, false, generation, failure, 0, 0, 0, NULL);
 +      return false;
 +   }
 +   published_at = cpu_features_get_time_usec();
 +   pause_frame_reply(cmd, true, generation, NULL,
-+         published_width, published_height);
++         published_width, published_height, capture.bytes_per_pixel,
++         capture.format_name);
 +   RARCH_LOG("[ConsoleOS] pause_frame generation=%" PRIu64
-+         " source=%ux%u published=%ux%u format=RGBA8888"
++         " source=%ux%u published=%ux%u format=%s"
 +         " readback_us=%" PRId64 " downsample_us=%" PRId64
 +         " publish_us=%" PRId64 " total_us=%" PRId64 "\n",
 +         generation, capture.width, capture.height,
-+         published_width, published_height,
++         published_width, published_height, capture.format_name,
 +         pixels_at - received_at, downsampled_at - pixels_at,
 +         published_at - downsampled_at, published_at - received_at);
 +   if (published_pixels != capture.pixels)

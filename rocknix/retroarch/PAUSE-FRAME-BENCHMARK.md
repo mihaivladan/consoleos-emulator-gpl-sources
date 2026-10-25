@@ -25,6 +25,7 @@ Success is returned only after the atomic rename:
 
 ```text
 PAUSE_FRAME_READY <generation> <width> <height> <stride> RGBA8888
+PAUSE_FRAME_READY <generation> <width> <height> <stride> RGB565
 ```
 
 Failures use:
@@ -38,8 +39,8 @@ Malformed generations report generation 0. The bounded reasons are
 `allocation_failed`, `open_failed`, `write_failed`, and `rename_failed`.
 
 The experiment reads the lifetime-safe CPU frame cache already used by the
-normal screenshot pipeline. It accepts only the target's XRGB8888 source and
-publishes top-left RGBA8888. It intentionally does not add GPU/backend
+normal screenshot pipeline. XRGB8888 is converted to RGBA8888. Native RGB565
+is copied without conversion. It intentionally does not add GPU/backend
 readback. If the RP5 returns `no_cpu_frame`, stop the experiment: adding a
 graphics-backend path is outside this benchmark.
 
@@ -56,14 +57,15 @@ it over `/run/consoleos/pause-frame.raw`. The 56-byte header is little-endian:
 | 16 | 8 | generation |
 | 24 | 4 | width |
 | 28 | 4 | height |
-| 32 | 4 | stride, exactly `width * 4` |
-| 36 | 4 | format, 1 = RGBA8888 |
+| 32 | 4 | stride: `width * 4` for RGBA8888 or `width * 2` for RGB565 |
+| 36 | 4 | format: 1 = RGBA8888, 2 = RGB565 |
 | 40 | 4 | orientation, 1 = top-left |
 | 44 | 4 | reserved, zero |
 | 48 | 8 | payload bytes, exactly `stride * height` |
 
-The payload contains consecutive top-to-bottom RGBA8888 rows with no padding.
-The prior valid `.raw` remains untouched on every failure.
+The payload contains consecutive top-to-bottom rows with no padding. RGB565
+payload bytes are the core's native pixels and are not channel-converted. The
+prior valid `.raw` remains untouched on every failure.
 
 One log line records `readback_us`, `downsample_us`, `publish_us`, and
 `total_us`. Readback includes the required XRGB8888-to-RGBA8888 conversion.
@@ -77,11 +79,20 @@ SCREENSHOT_DIR=/storage/screenshots \
   /run/consoleos/benchmark-pause-frame.sh
 ```
 
+The script finds the running RetroArch PID and re-executes itself through
+`nsenter -t "$pid" -n --` when necessary. It does not weaken RetroArch's
+`PrivateNetwork=yes` isolation. If automatic entry is unavailable, run the
+exact command printed by the script. UDP requests and replies use a connected
+Python 3 socket with a five-second bound and full-response validation.
+
 Override `SCREENSHOT_DIR` with the actual configured screenshot directory.
 The script performs exactly 10 full-size raw captures, 10 half-width/height
-raw captures, and 10 ordinary `SCREENSHOT` PNG captures. It removes the raw
-file before each measured raw sample, validates the complete header and
-payload length, reports median/maximum total time, rejects an invalid scale
+raw captures, and 10 ordinary `SCREENSHOT` PNG captures. PNG completion
+requires a changed file with a valid signature and final `IEND` chunk; the
+pre-command directory snapshot detects reuse of a same-second filename. It
+removes the raw file before each measured raw sample, validates the complete
+header and payload length, reports median/maximum total time, rejects an
+invalid scale
 and malformed generation without changing the last valid raw file, and
 exercises two atomic replacements without removing the destination. Set
 `CHECK_NO_GAME_FAILURE=1` for a destructive final check that sends
@@ -94,13 +105,16 @@ Do not replace `/usr/bin/retroarch` on disk. Stage the experimental artifact
 and script in tmpfs, verify hashes, then bind-mount the binary for one launch:
 
 ```sh
-install -m 0755 retroarch-pause-frame-experiment \
-  /run/consoleos/retroarch-pause-frame-experiment
+install -m 0755 retroarch-pause-frame-rgb565-experiment \
+  /run/consoleos/retroarch-pause-frame-rgb565-experiment
 install -m 0755 benchmark-pause-frame.sh \
   /run/consoleos/benchmark-pause-frame.sh
-sha256sum /run/consoleos/retroarch-pause-frame-experiment \
-  /run/consoleos/benchmark-pause-frame.sh
-mount --bind /run/consoleos/retroarch-pause-frame-experiment /usr/bin/retroarch
+install -m 0755 pause-frame-benchmark.py \
+  /run/consoleos/pause-frame-benchmark.py
+sha256sum /run/consoleos/retroarch-pause-frame-rgb565-experiment \
+  /run/consoleos/benchmark-pause-frame.sh \
+  /run/consoleos/pause-frame-benchmark.py
+mount --bind /run/consoleos/retroarch-pause-frame-rgb565-experiment /usr/bin/retroarch
 ```
 
 Launch a game through the unchanged session after the bind mount. Roll back
@@ -108,8 +122,9 @@ without modifying the immutable image:
 
 ```sh
 umount /usr/bin/retroarch
-rm -f /run/consoleos/retroarch-pause-frame-experiment \
+rm -f /run/consoleos/retroarch-pause-frame-rgb565-experiment \
   /run/consoleos/benchmark-pause-frame.sh \
+  /run/consoleos/pause-frame-benchmark.py \
   /run/consoleos/pause-frame.next /run/consoleos/pause-frame.raw
 ```
 
