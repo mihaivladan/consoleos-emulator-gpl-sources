@@ -1,0 +1,314 @@
+diff --git a/command.c b/command.c
+index 9133736522..30183545c7 100644
+--- a/command.c
++++ b/command.c
+@@ -20,6 +20,11 @@
+ #include <stdlib.h>
+ #include <stddef.h>
+ #include <locale.h>
++#if defined(__linux__)
++#include <errno.h>
++#include <unistd.h>
++#include <features/features_cpu.h>
++#endif
+ #ifdef HAVE_NETWORKING
+ #include <net/net_compat.h>
+ #include <net/net_socket.h>
+@@ -912,6 +917,271 @@ bool command_get_load_state_status(command_t *cmd, const char *arg)
+    return true;
+ }
+-
++
++#if defined(__linux__)
++#define PAUSE_FRAME_NEXT "/run/consoleos/pause-frame.next"
++#define PAUSE_FRAME_RAW  "/run/consoleos/pause-frame.raw"
++#define PAUSE_FRAME_FORMAT_RGBA8888 1U
++#define PAUSE_FRAME_ORIENTATION_TOP_LEFT 1U
++
++struct pause_frame_header
++{
++   uint8_t magic[8];
++   uint32_t version;
++   uint32_t header_bytes;
++   uint64_t generation;
++   uint32_t width;
++   uint32_t height;
++   uint32_t stride;
++   uint32_t format;
++   uint32_t orientation;
++   uint32_t reserved;
++   uint64_t payload_bytes;
++};
++
++struct pause_frame_capture
++{
++   uint8_t *pixels;
++   unsigned width;
++   unsigned height;
++   const char *failure;
++};
++
++static void pause_frame_reply(command_t *cmd, bool ready,
++      uint64_t generation, const char *detail,
++      unsigned width, unsigned height)
++{
++   char reply[160];
++   size_t len = ready
++         ? snprintf(reply, sizeof(reply),
++               "PAUSE_FRAME_READY %" PRIu64 " %u %u %u RGBA8888\n",
++               generation, width, height, width * 4U)
++         : snprintf(reply, sizeof(reply),
++               "PAUSE_FRAME_FAILED %" PRIu64 " %s\n",
++               generation, detail ? detail : "unknown");
++   cmd->replier(cmd, reply, len);
++}
++
++static bool pause_frame_parse(const char *arg,
++      uint64_t *generation, unsigned *scale)
++{
++   char *end;
++   unsigned long long parsed_generation;
++   unsigned long parsed_scale;
++
++   *generation = 0;
++   *scale      = 0;
++   if (!arg || *arg < '1' || *arg > '9')
++      return false;
++   errno = 0;
++   parsed_generation = strtoull(arg, &end, 10);
++   if (errno || !parsed_generation || *end != ' ')
++      return false;
++   *generation = (uint64_t)parsed_generation;
++   while (*end == ' ')
++      end++;
++   if (*end < '1' || *end > '2')
++      return false;
++   errno = 0;
++   parsed_scale = strtoul(end, &end, 10);
++   if (errno || *end || (parsed_scale != 1 && parsed_scale != 2))
++      return false;
++   *scale = (unsigned)parsed_scale;
++   return true;
++}
++
++static bool pause_frame_dimensions(unsigned width, unsigned height)
++{
++   return width && height && width <= SIZE_MAX / 4U
++         && height <= SIZE_MAX / ((size_t)width * 4U);
++}
++
++static void pause_frame_read(void *userdata, const void *data,
++      unsigned width, unsigned height, size_t pitch)
++{
++   struct pause_frame_capture *capture =
++      (struct pause_frame_capture*)userdata;
++   unsigned y;
++
++   if (!data || !pause_frame_dimensions(width, height)
++         || pitch < (size_t)width * 4U)
++      return;
++   capture->pixels = (uint8_t*)malloc((size_t)width * height * 4U);
++   if (!capture->pixels)
++   {
++      capture->failure = "allocation_failed";
++      return;
++   }
++   for (y = 0; y < height; y++)
++   {
++      const uint8_t *src = (const uint8_t*)data + (size_t)y * pitch;
++      uint8_t *dst = capture->pixels + (size_t)y * width * 4U;
++      unsigned x;
++      for (x = 0; x < width; x++, dst += 4)
++      {
++         uint32_t pixel;
++         memcpy(&pixel, src + (size_t)x * 4U, sizeof(pixel));
++         dst[0] = (uint8_t)(pixel >> 16);
++         dst[1] = (uint8_t)(pixel >> 8);
++         dst[2] = (uint8_t)pixel;
++         dst[3] = 0xffU;
++      }
++   }
++   capture->width   = width;
++   capture->height  = height;
++   capture->failure = NULL;
++}
++
++static uint8_t *pause_frame_half(const uint8_t *source,
++      unsigned width, unsigned height)
++{
++   unsigned out_width  = width / 2U;
++   unsigned out_height = height / 2U;
++   uint8_t *output;
++   unsigned y;
++
++   if (!out_width || !out_height)
++      return NULL;
++   output = (uint8_t*)malloc((size_t)out_width * out_height * 4U);
++   if (!output)
++      return NULL;
++   for (y = 0; y < out_height; y++)
++   {
++      const uint8_t *src = source + (size_t)(y * 2U) * width * 4U;
++      uint8_t *dst = output + (size_t)y * out_width * 4U;
++      unsigned x;
++      for (x = 0; x < out_width; x++)
++         memcpy(dst + (size_t)x * 4U, src + (size_t)(x * 2U) * 4U, 4U);
++   }
++   return output;
++}
++
++static bool pause_frame_publish(uint64_t generation,
++      const uint8_t *pixels, unsigned width, unsigned height,
++      const char **failure)
++{
++   struct pause_frame_header header = {
++      {'C','O','S','P','F','R','A','W'}, 1U,
++      sizeof(struct pause_frame_header), generation,
++      width, height, width * 4U, PAUSE_FRAME_FORMAT_RGBA8888,
++      PAUSE_FRAME_ORIENTATION_TOP_LEFT, 0U,
++      (uint64_t)width * height * 4U
++   };
++   FILE *file;
++   bool okay;
++
++   _Static_assert(sizeof(struct pause_frame_header) == 56U,
++         "pause frame header layout changed");
++   if (!(file = fopen(PAUSE_FRAME_NEXT, "wb")))
++   {
++      *failure = "open_failed";
++      return false;
++   }
++   okay = fwrite(&header, sizeof(header), 1, file) == 1
++         && fwrite(pixels, (size_t)header.payload_bytes, 1, file) == 1;
++   if (fclose(file) != 0)
++      okay = false;
++   if (!okay)
++   {
++      unlink(PAUSE_FRAME_NEXT);
++      *failure = "write_failed";
++      return false;
++   }
++   if (rename(PAUSE_FRAME_NEXT, PAUSE_FRAME_RAW) != 0)
++   {
++      unlink(PAUSE_FRAME_NEXT);
++      *failure = "rename_failed";
++      return false;
++   }
++   return true;
++}
++
++bool command_consoleos_pause_frame(command_t *cmd, const char *arg)
++{
++   video_driver_state_t *video_st = video_state_get_ptr();
++   runloop_state_t *runloop_st     = runloop_state_get_ptr();
++   struct pause_frame_capture capture = {NULL, 0, 0, "no_cpu_frame"};
++   uint8_t *published_pixels;
++   uint64_t generation;
++   unsigned scale;
++   unsigned published_width;
++   unsigned published_height;
++   const char *failure = "no_cpu_frame";
++   retro_time_t received_at = cpu_features_get_time_usec();
++   retro_time_t pixels_at;
++   retro_time_t downsampled_at;
++   retro_time_t published_at;
++
++   unlink(PAUSE_FRAME_NEXT);
++   if (!pause_frame_parse(arg, &generation, &scale))
++   {
++      pause_frame_reply(cmd, false, generation, "invalid_arguments", 0, 0);
++      return false;
++   }
++   if (!(runloop_st->current_core.flags & RETRO_CORE_FLAG_GAME_LOADED))
++   {
++      pause_frame_reply(cmd, false, generation, "no_game", 0, 0);
++      return false;
++   }
++   if (!video_st || video_st->pix_fmt != RETRO_PIXEL_FORMAT_XRGB8888)
++   {
++      pause_frame_reply(cmd, false, generation, "unsupported_format", 0, 0);
++      return false;
++   }
++
++   video_driver_cached_frame_read(&capture, pause_frame_read);
++   if (!capture.pixels)
++   {
++      pause_frame_reply(cmd, false, generation, capture.failure, 0, 0);
++      return false;
++   }
++   pixels_at = cpu_features_get_time_usec();
++
++   published_pixels = capture.pixels;
++   published_width  = capture.width;
++   published_height = capture.height;
++   if (scale == 2)
++   {
++      published_width  /= 2U;
++      published_height /= 2U;
++      published_pixels = pause_frame_half(capture.pixels,
++            capture.width, capture.height);
++      if (!published_pixels)
++      {
++         free(capture.pixels);
++         pause_frame_reply(cmd, false, generation,
++               "allocation_failed", 0, 0);
++         return false;
++      }
++   }
++   downsampled_at = cpu_features_get_time_usec();
++
++   if (!pause_frame_publish(generation, published_pixels,
++            published_width, published_height, &failure))
++   {
++      if (published_pixels != capture.pixels)
++         free(published_pixels);
++      free(capture.pixels);
++      pause_frame_reply(cmd, false, generation, failure, 0, 0);
++      return false;
++   }
++   published_at = cpu_features_get_time_usec();
++   pause_frame_reply(cmd, true, generation, NULL,
++         published_width, published_height);
++   RARCH_LOG("[ConsoleOS] pause_frame generation=%" PRIu64
++         " source=%ux%u published=%ux%u format=RGBA8888"
++         " readback_us=%" PRId64 " downsample_us=%" PRId64
++         " publish_us=%" PRId64 " total_us=%" PRId64 "\n",
++         generation, capture.width, capture.height,
++         published_width, published_height,
++         pixels_at - received_at, downsampled_at - pixels_at,
++         published_at - downsampled_at, published_at - received_at);
++   if (published_pixels != capture.pixels)
++      free(published_pixels);
++   free(capture.pixels);
++   return true;
++}
++#endif
++
+ bool command_play_replay_slot(command_t *cmd, const char *arg)
+ {
+ #ifdef HAVE_BSV_MOVIE
+diff --git a/command.h b/command.h
+index d50c6c8309..76d35d01ea 100644
+--- a/command.h
++++ b/command.h
+@@ -436,6 +436,9 @@ bool command_get_config_param(command_t *cmd, const char* arg);
+ bool command_show_osd_msg(command_t *cmd, const char* arg);
+ bool command_load_state_slot(command_t *cmd, const char* arg);
+ bool command_get_load_state_status(command_t *cmd, const char* arg);
++#if defined(__linux__)
++bool command_consoleos_pause_frame(command_t *cmd, const char* arg);
++#endif
+ bool command_save_state_slot(command_t* cmd, const char* arg);
+ bool command_play_replay_slot(command_t *cmd, const char* arg);
+ bool command_seek_replay(command_t *cmd, const char *arg);
+@@ -468,6 +471,9 @@ static const struct cmd_action_map action_map[] = {
+-
++
+    { "LOAD_STATE_SLOT",command_load_state_slot, "<slot number>"},
+    { "GET_LOAD_STATE_STATUS",command_get_load_state_status, "No argument"},
++#if defined(__linux__)
++   { "CONSOLEOS_PAUSE_FRAME",command_consoleos_pause_frame, "<generation> <scale>"},
++#endif
+    { "SAVE_STATE_SLOT",command_save_state_slot, "<slot number>"},
+    { "PLAY_REPLAY_SLOT",command_play_replay_slot, "<slot number>"},
+    { "SEEK_REPLAY",command_seek_replay, "<frame number>"},

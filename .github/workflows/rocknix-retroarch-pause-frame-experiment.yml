@@ -1,0 +1,184 @@
+name: ROCKNIX RP5 RetroArch pause-frame experiment
+
+on:
+  push:
+    branches:
+      - codex/pause-frame-benchmark
+    paths:
+      - .github/workflows/rocknix-retroarch-pause-frame-experiment.yml
+      - rocknix/retroarch/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  retroarch-pause-frame:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      ROCKNIX_COMMIT: 1ebff24f36501fb6493beb2bf83bf2604536d9aa
+      RETROARCH_COMMIT: bdba046fa6766380bc2457532f38e589df769aaf
+      ROCKNIX_RELEASE_URL: https://github.com/ROCKNIX/distribution/releases/download/20260901/ROCKNIX-SM8250.aarch64-20260901.tar
+      ROCKNIX_RELEASE_SHA256: 3c23a04b76a9237b4d824819d80cc83c98ce118d33e1bd979a2a68ff40f034cb
+      BUILD_CONTAINER: ubuntu:25.04@sha256:34e8533bf27ac50f60bec267f6ce18c9aeb9556574e1ec1a8ce89926d32ea8f3
+      CORRELATED_PATCH: rocknix/retroarch/0001-consoleos-correlated-load-completion.patch
+      EXPERIMENT_PATCH: rocknix/retroarch/0002-consoleos-pause-frame-raw-benchmark.patch
+      ARTIFACT_DIR: retroarch-pause-frame-artifact
+      TARGET_ROOT: rocknix-target-root
+    steps:
+      - name: Check out ConsoleOS GPL sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Check out pinned ROCKNIX RetroArch recipe
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ROCKNIX/distribution
+          ref: 1ebff24f36501fb6493beb2bf83bf2604536d9aa
+          path: distribution
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /projects/ROCKNIX/packages/emulators/libretro/retroarch/
+
+      - name: Check out pinned RetroArch source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: libretro/RetroArch
+          ref: bdba046fa6766380bc2457532f38e589df769aaf
+          path: retroarch
+          persist-credentials: false
+
+      - name: Verify pinned inputs
+        id: inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          recipe=distribution/projects/ROCKNIX/packages/emulators/libretro/retroarch/package.mk
+          grep -Fq 'PKG_VERSION="bdba046fa6766380bc2457532f38e589df769aaf"' "$recipe"
+          echo 'f7308eb1782687eba0c30789aee6a2e99da105487162de8f7dd0bfad94c3695a  '"$recipe" | sha256sum -c -
+          correlated_sha=$(sha256sum "$CORRELATED_PATCH" | awk '{print $1}')
+          experiment_sha=$(sha256sum "$EXPERIMENT_PATCH" | awk '{print $1}')
+          printf 'correlated_sha=%s\n' "$correlated_sha" >> "$GITHUB_OUTPUT"
+          printf 'experiment_sha=%s\n' "$experiment_sha" >> "$GITHUB_OUTPUT"
+          printf 'cache_key=consoleos-retroarch-pause-frame-aarch64-%s-%s-%s-%s\n' \
+            "$RETROARCH_COMMIT" "$ROCKNIX_COMMIT" \
+            "$correlated_sha" "$experiment_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Restore exact cached experimental artifact
+        id: artifact-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: retroarch-pause-frame-artifact
+          key: ${{ steps.inputs.outputs.cache_key }}
+
+      - name: Restore pinned ROCKNIX runtime root
+        if: steps.artifact-cache.outputs.cache-hit != 'true'
+        id: runtime-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: rocknix-target-root
+          key: rocknix-sm8250-runtime-${{ env.ROCKNIX_COMMIT }}-${{ env.ROCKNIX_RELEASE_SHA256 }}
+
+      - name: Extract checksum-verified ROCKNIX runtime root
+        if: steps.artifact-cache.outputs.cache-hit != 'true' && steps.runtime-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends squashfs-tools
+          rocknix/retroarch/extract-rocknix-runtime.sh \
+            "$ROCKNIX_RELEASE_URL" "$ROCKNIX_RELEASE_SHA256" "$TARGET_ROOT"
+
+      - name: Apply pinned ROCKNIX, correlated-load and experiment patches
+        if: steps.artifact-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          patch_dir=distribution/projects/ROCKNIX/packages/emulators/libretro/retroarch/patches
+          while IFS= read -r patch_file; do
+            patch -d retroarch -p1 --forward --batch < "$patch_file"
+          done < <(find "$patch_dir" -maxdepth 1 -type f -name '*.patch' | LC_ALL=C sort)
+          patch -d retroarch -p1 --forward --batch < "$CORRELATED_PATCH"
+          patch -d retroarch -p1 --forward --batch < "$EXPERIMENT_PATCH"
+
+      - name: Cross-compile against the ROCKNIX runtime ABI
+        if: steps.artifact-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD:/work" -w /work \
+            "$BUILD_CONTAINER" \
+            bash rocknix/retroarch/build-in-container.sh \
+              /work/retroarch /work/$ARTIFACT_DIR /work/$TARGET_ROOT \
+            2>&1 | tee retroarch-pause-frame-build.log
+          docker run --rm \
+            -v "$PWD:/work" \
+            "$BUILD_CONTAINER" \
+            chown -R "$(id -u):$(id -g)" "/work/$ARTIFACT_DIR"
+          mv "$ARTIFACT_DIR/retroarch" \
+            "$ARTIFACT_DIR/retroarch-pause-frame-experiment"
+
+      - name: Complete experimental artifact provenance
+        if: steps.artifact-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -m 0644 "$CORRELATED_PATCH" "$EXPERIMENT_PATCH" \
+            rocknix/retroarch/PAUSE-FRAME-BENCHMARK.md "$ARTIFACT_DIR/"
+          install -m 0755 rocknix/retroarch/benchmark-pause-frame.sh \
+            rocknix/retroarch/build-in-container.sh \
+            rocknix/retroarch/build-standalone-aarch64.sh \
+            rocknix/retroarch/extract-rocknix-runtime.sh \
+            rocknix/retroarch/verify-rocknix-abi.sh "$ARTIFACT_DIR/"
+          {
+            printf 'rocknix_commit=%s\n' "$ROCKNIX_COMMIT"
+            printf 'retroarch_commit=%s\n' "$RETROARCH_COMMIT"
+            printf 'correlated_patch_sha256=%s\n' '${{ steps.inputs.outputs.correlated_sha }}'
+            printf 'experiment_patch_sha256=%s\n' '${{ steps.inputs.outputs.experiment_sha }}'
+            printf 'rocknix_release_sha256=%s\n' "$ROCKNIX_RELEASE_SHA256"
+            printf 'build_container=%s\n' "$BUILD_CONTAINER"
+            printf 'build_mode=standalone-aarch64-cross-rocknix-runtime-link\n'
+            printf 'artifact_role=non-accepted-pause-frame-experiment\n'
+            printf 'source_repository=%s\n' "$GITHUB_REPOSITORY"
+            printf 'source_commit=%s\n' "$GITHUB_SHA"
+            printf 'artifact_cache_key=%s\n' '${{ steps.inputs.outputs.cache_key }}'
+            printf 'device_benchmark_required=true\n'
+          } > "$ARTIFACT_DIR/PROVENANCE"
+          (cd "$ARTIFACT_DIR" && find . -maxdepth 1 -type f ! -name SHA256SUMS \
+            -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > SHA256SUMS)
+
+      - name: Verify cached or newly built experimental artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd "$ARTIFACT_DIR" && sha256sum -c SHA256SUMS)
+          binary="$ARTIFACT_DIR/retroarch-pause-frame-experiment"
+          file "$binary" | grep -Fq 'ARM aarch64'
+          strings "$binary" > /tmp/retroarch-pause-frame.strings
+          grep -Fxq 'GET_LOAD_STATE_STATUS' /tmp/retroarch-pause-frame.strings
+          grep -Fq 'LOAD_STATE_STATUS' /tmp/retroarch-pause-frame.strings
+          grep -Fxq 'CONSOLEOS_PAUSE_FRAME' /tmp/retroarch-pause-frame.strings
+          grep -Fq 'PAUSE_FRAME_READY' /tmp/retroarch-pause-frame.strings
+          grep -Fq 'PAUSE_FRAME_FAILED' /tmp/retroarch-pause-frame.strings
+          grep -Fq '/run/consoleos/pause-frame.next' /tmp/retroarch-pause-frame.strings
+          grep -Fq '/run/consoleos/pause-frame.raw' /tmp/retroarch-pause-frame.strings
+          grep -Fxq "rocknix_commit=$ROCKNIX_COMMIT" "$ARTIFACT_DIR/PROVENANCE"
+          grep -Fxq "retroarch_commit=$RETROARCH_COMMIT" "$ARTIFACT_DIR/PROVENANCE"
+          grep -Fxq 'artifact_role=non-accepted-pause-frame-experiment' \
+            "$ARTIFACT_DIR/PROVENANCE"
+          grep -Fxq 'abi_gate=pass' "$ARTIFACT_DIR/ABI-REPORT.txt"
+          grep -Fxq 'feature_parity=pass' "$ARTIFACT_DIR/ABI-REPORT.txt"
+          cat "$ARTIFACT_DIR/SHA256SUMS"
+
+      - name: Upload separately named experimental artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: consoleos-rocknix-sm8250-retroarch-pause-frame-experiment
+          retention-days: 14
+          compression-level: 0
+          if-no-files-found: error
+          path: retroarch-pause-frame-artifact/
