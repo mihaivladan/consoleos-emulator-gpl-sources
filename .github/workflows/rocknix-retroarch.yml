@@ -148,4 +148,4 @@ jobs:
           retention-days: 14
           compression-level: 0
           if-no-files-found: error
-          path: retroarch-artifact/
+          path: retroarch-upstream-state-test-artifact/
